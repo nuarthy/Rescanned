@@ -1,5 +1,6 @@
 import tailwindcss from "@tailwindcss/vite";
 import { devtools } from "@tanstack/devtools-vite";
+import { cloudflare } from "@cloudflare/vite-plugin";
 
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 
@@ -19,6 +20,10 @@ const config = defineConfig({
 			consolePiping: { enabled: false },
 		}),
 		tailwindcss(),
+		// The Worker runs in workerd for `vite dev`, `vite build`, and
+		// `vite preview`, so local runs match the deployed runtime. It has to see
+		// the SSR environment that TanStack Start builds into.
+		cloudflare({ viteEnvironment: { name: "ssr" } }),
 		tanstackStart(),
 		viteReact(),
 	],

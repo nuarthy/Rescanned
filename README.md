@@ -25,10 +25,26 @@ The app serves on <http://localhost:3000>.
 | Command | Purpose |
 | --- | --- |
 | `bun --bun run build` | Build the client and server bundles into `dist/` |
-| `bun --bun run preview` | Serve the built client bundle on port 4173 |
+| `bun --bun run preview` | Serve the built app in the Workers runtime on port 4173 |
+| `bun --bun run deploy` | Build, then publish to Cloudflare |
 | `bun run test` | Run the unit tests |
 | `bun run typecheck` | Run the TypeScript compiler with no output |
 | `bun run check` | Lint and format with Biome |
+
+## Deployment
+
+The app deploys to Cloudflare Workers through `@cloudflare/vite-plugin`. The
+plugin also runs the app inside `workerd` for `vite dev` and `vite preview`, so
+local runs behave like production.
+
+`wrangler.jsonc` holds the Worker name, its `main` entry (the TanStack Start
+server entry), the `nodejs_compat` flag, and the custom domain. On the first
+deploy, Cloudflare creates the DNS record and the certificate for
+`rescanned.nuarthy.my.id` itself.
+
+```bash
+bun --bun run deploy
+```
 
 ## How it works
 
