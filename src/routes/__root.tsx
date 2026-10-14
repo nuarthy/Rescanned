@@ -24,13 +24,29 @@ export const Route = createRootRoute({
 				content: "#020617",
 			},
 			{
-				title: "Document scanner",
+				title: "Rescanned",
 			},
 		],
 		links: [
 			{
 				rel: "stylesheet",
 				href: appCss,
+			},
+			// Scalable first, with a bitmap for browsers that ignore SVG icons.
+			{
+				rel: "icon",
+				type: "image/svg+xml",
+				href: "/rescanned.svg",
+			},
+			{
+				rel: "icon",
+				type: "image/png",
+				sizes: "32x32",
+				href: "/favicon-32.png",
+			},
+			{
+				rel: "apple-touch-icon",
+				href: "/apple-touch-icon.png",
 			},
 		],
 	}),

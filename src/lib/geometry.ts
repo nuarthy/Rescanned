@@ -92,6 +92,24 @@ export function quadArea(quad: Quad): number {
 	return polygonArea(quadPoints(quad));
 }
 
+/** How close a quad runs to the frame, as a share of the frame's short side. */
+export function quadBorderInset(
+	quad: Quad,
+	width: number,
+	height: number,
+): number {
+	const points = quadPoints(quad);
+	const left = Math.min(...points.map((point) => point.x));
+	const right = Math.max(...points.map((point) => point.x));
+	const top = Math.min(...points.map((point) => point.y));
+	const bottom = Math.max(...points.map((point) => point.y));
+	const shortest = Math.min(width, height);
+
+	return (
+		Math.min(left, top, width - right, height - bottom) / Math.max(1, shortest)
+	);
+}
+
 export function polygonPerimeter(points: readonly Point[]): number {
 	let total = 0;
 	for (let i = 0; i < points.length; i += 1) {
@@ -369,6 +387,53 @@ export function clampPointToBounds(
 	return {
 		x: Math.max(0, Math.min(width, point.x)),
 		y: Math.max(0, Math.min(height, point.y)),
+	};
+}
+
+/** True when the point lies inside the convex quad. */
+export function quadContainsPoint(quad: Quad, point: Point): boolean {
+	const points = quadPoints(quad);
+	let sign = 0;
+
+	for (let i = 0; i < points.length; i += 1) {
+		const turn = cross(points[i], points[(i + 1) % 4], point);
+		if (turn === 0) continue;
+		const direction = Math.sign(turn);
+		if (sign === 0) sign = direction;
+		else if (direction !== sign) return false;
+	}
+
+	return sign !== 0;
+}
+
+/**
+ * Move the whole quad by a delta, stopping at the image edge.
+ *
+ * The delta is limited by the corner closest to the edge it is moving toward,
+ * so a drag that overshoots leaves the quad fully inside the image instead of
+ * squashing it against the border.
+ */
+export function translateQuad(
+	quad: Quad,
+	deltaX: number,
+	deltaY: number,
+	width: number,
+	height: number,
+): Quad {
+	const points = quadPoints(quad);
+	const left = Math.min(...points.map((point) => point.x));
+	const right = Math.max(...points.map((point) => point.x));
+	const top = Math.min(...points.map((point) => point.y));
+	const bottom = Math.max(...points.map((point) => point.y));
+
+	const shiftX = Math.max(-left, Math.min(width - right, deltaX));
+	const shiftY = Math.max(-top, Math.min(height - bottom, deltaY));
+
+	return {
+		tl: { x: quad.tl.x + shiftX, y: quad.tl.y + shiftY },
+		tr: { x: quad.tr.x + shiftX, y: quad.tr.y + shiftY },
+		br: { x: quad.br.x + shiftX, y: quad.br.y + shiftY },
+		bl: { x: quad.bl.x + shiftX, y: quad.bl.y + shiftY },
 	};
 }
 

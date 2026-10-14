@@ -10,9 +10,11 @@ import {
 	type Quad,
 	quadAngles,
 	quadArea,
+	quadContainsPoint,
 	quadFromHull,
 	quadPoints,
 	rotateQuad,
+	translateQuad,
 	withQuadCorner,
 } from "./geometry";
 import { quadOutputSize } from "./perspective";
@@ -236,5 +238,48 @@ describe("rotateQuad", () => {
 		const turned = quadOutputSize(rotateQuad(rectangle, 1));
 		expect(turned.width).toBe(upright.height);
 		expect(turned.height).toBe(upright.width);
+	});
+});
+
+describe("quadContainsPoint", () => {
+	const quad: Quad = {
+		tl: { x: 10, y: 10 },
+		tr: { x: 110, y: 20 },
+		br: { x: 100, y: 120 },
+		bl: { x: 20, y: 110 },
+	};
+
+	it("accepts a point inside and rejects points outside", () => {
+		expect(quadContainsPoint(quad, { x: 60, y: 60 })).toBe(true);
+		expect(quadContainsPoint(quad, { x: 5, y: 5 })).toBe(false);
+		expect(quadContainsPoint(quad, { x: 60, y: 130 })).toBe(false);
+		expect(quadContainsPoint(quad, { x: 108, y: 60 })).toBe(false);
+	});
+});
+
+describe("translateQuad", () => {
+	const quad: Quad = {
+		tl: { x: 10, y: 20 },
+		tr: { x: 110, y: 30 },
+		br: { x: 100, y: 130 },
+		bl: { x: 20, y: 120 },
+	};
+
+	it("moves every corner by the same delta", () => {
+		const moved = translateQuad(quad, 25, -5, 400, 400);
+		expect(moved.tl).toEqual({ x: 35, y: 15 });
+		expect(moved.br).toEqual({ x: 125, y: 125 });
+	});
+
+	it("stops at the image edge instead of leaving the frame", () => {
+		const moved = translateQuad(quad, -100, -100, 400, 400);
+		expect(moved.tl).toEqual({ x: 0, y: 0 });
+		expect(moved.br).toEqual({ x: 90, y: 110 });
+
+		// Overshooting right and down parks the far corner on the border.
+		const far = translateQuad(quad, 400, 400, 200, 200);
+		const farPoints = quadPoints(far);
+		expect(Math.max(...farPoints.map((p) => p.x))).toBe(200);
+		expect(Math.max(...farPoints.map((p) => p.y))).toBe(200);
 	});
 });

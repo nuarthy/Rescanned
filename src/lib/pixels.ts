@@ -28,12 +28,18 @@ export function createMask(width: number, height: number): Mask {
 	return { data: new Uint8Array(width * height), width, height };
 }
 
+/** ITU-R BT.601 luma weights, also used for chroma work in the filters. */
+export const LUMA_WEIGHTS = { red: 0.299, green: 0.587, blue: 0.114 } as const;
+
 /** ITU-R BT.601 luma, kept on the 0..255 scale. */
 export function toGray(image: RgbaImage): GrayImage {
 	const { width, height, data } = image;
 	const gray = new Float32Array(width * height);
 	for (let i = 0, p = 0; i < gray.length; i += 1, p += 4) {
-		gray[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+		gray[i] =
+			LUMA_WEIGHTS.red * data[p] +
+			LUMA_WEIGHTS.green * data[p + 1] +
+			LUMA_WEIGHTS.blue * data[p + 2];
 	}
 	return { data: gray, width, height };
 }
@@ -257,7 +263,15 @@ export function otsuThreshold(gray: GrayImage): number {
 	return bestThreshold;
 }
 
-/** Separable max (dilate) or min (erode) filter with a square structuring element. */
+/**
+ * Separable max (dilate) or min (erode) filter with a square structuring element.
+ *
+ * On a binary mask, "is there a set pixel in the window" (dilate) and "is every
+ * pixel in the window set" (erode) both follow from a sliding sum, so each pass
+ * costs one add and one compare per pixel no matter how wide the radius is. That
+ * matters here: detection runs this filter over the whole working copy several
+ * times, and a naive window walk is what made detection slow on phones.
+ */
 export function morph(
 	mask: Mask,
 	radius: number,
@@ -268,29 +282,40 @@ export function morph(
 	const { width, height } = mask;
 	const alongX = new Uint8Array(width * height);
 	const output = createMask(width, height);
-	const pick = mode === "dilate" ? Math.max : Math.min;
+	const wantsSet = mode === "dilate";
 
-	for (let y = 0; y < height; y += 1) {
-		for (let x = 0; x < width; x += 1) {
-			let value = mode === "dilate" ? 0 : 1;
-			for (let offset = -radius; offset <= radius; offset += 1) {
-				const sampleX = Math.min(width - 1, Math.max(0, x + offset));
-				value = pick(value, mask.data[y * width + sampleX]);
-			}
-			alongX[y * width + x] = value;
-		}
-	}
+	const line = Math.max(width, height);
+	const running = new Int32Array(line + 1);
 
-	for (let y = 0; y < height; y += 1) {
-		for (let x = 0; x < width; x += 1) {
-			let value = mode === "dilate" ? 0 : 1;
-			for (let offset = -radius; offset <= radius; offset += 1) {
-				const sampleY = Math.min(height - 1, Math.max(0, y + offset));
-				value = pick(value, alongX[sampleY * width + x]);
+	const axis = (
+		source: Uint8Array,
+		target: Uint8Array,
+		outer: number,
+		inner: number,
+		stride: number,
+		step: number,
+	) => {
+		for (let o = 0; o < outer; o += 1) {
+			let sum = 0;
+			running[0] = 0;
+			for (let i = 0; i < inner; i += 1) {
+				sum += source[o * stride + i * step];
+				running[i + 1] = sum;
 			}
-			output.data[y * width + x] = value;
+			for (let i = 0; i < inner; i += 1) {
+				const from = i - radius < 0 ? 0 : i - radius;
+				const to = i + radius > inner - 1 ? inner - 1 : i + radius;
+				const set = running[to + 1] - running[from];
+				const fits = wantsSet ? set > 0 : set === to - from + 1;
+				target[o * stride + i * step] = fits ? 1 : 0;
+			}
 		}
-	}
+	};
+
+	// Rows, then columns: drawing the result of the first pass into `alongX`
+	// keeps the second pass reading a flat buffer.
+	axis(mask.data, alongX, height, width, width, 1);
+	axis(alongX, output.data, width, height, 1, width);
 
 	return output;
 }
@@ -356,6 +381,128 @@ export function largestComponent(mask: Mask): Mask | null {
 	const output = createMask(width, height);
 	for (const index of best) output.data[index] = 1;
 	return output;
+}
+
+export interface FloodOptions {
+	/**
+	 * How far below its own seed a region may spread, as a share of the
+	 * distance from the seed's level to the dimmest level worth keeping.
+	 */
+	dropShare?: number;
+	/** Maximum number of regions to grow. */
+	maxRegions?: number;
+	/** Dimmest level a region may start from. */
+	minLevel?: number;
+}
+
+/**
+ * Split a grayscale image into regions grown from its brightest pixels down.
+ *
+ * Each region starts at the brightest pixel no earlier region claimed, then
+ * spreads to neighbouring pixels in descending brightness order until its
+ * frontier drops `dropShare` of the seed's range below the seed. A stop level
+ * relative to each seed lets one photo hold both a dim surface and a bright
+ * page, which no single global threshold separates, and any dark boundary stops
+ * a region, which is what keeps a page apart from a similar surface behind it.
+ *
+ * Regions come back largest first, and cover the image in a gradient only when
+ * they meet no boundary at all.
+ */
+export function floodRegions(
+	gray: GrayImage,
+	options: FloodOptions = {},
+): Mask[] {
+	const dropShare = options.dropShare ?? 0.4;
+	const maxRegions = options.maxRegions ?? 6;
+	const minLevel = options.minLevel ?? 8;
+
+	const { width, height, data } = gray;
+	const count = width * height;
+	const levels = new Uint8Array(count);
+	for (let index = 0; index < count; index += 1) {
+		const value = Math.round(data[index]);
+		levels[index] = value < 0 ? 0 : value > 255 ? 255 : value;
+	}
+
+	// Pixels in ascending brightness, so each region can claim the brightest
+	// pixel that nothing has claimed yet.
+	const buckets: number[][] = [];
+	for (let level = 0; level < 256; level += 1) buckets.push([]);
+	const histogram = new Int32Array(257);
+	for (let index = 0; index < count; index += 1)
+		histogram[levels[index] + 1] += 1;
+	for (let level = 0; level < 256; level += 1)
+		histogram[level + 1] += histogram[level];
+	const order = new Int32Array(count);
+	const cursor = histogram.slice(0, 256);
+	for (let index = 0; index < count; index += 1) {
+		order[cursor[levels[index]]] = index;
+		cursor[levels[index]] += 1;
+	}
+
+	const claimed = new Uint8Array(count);
+	const inRegion = new Uint8Array(count);
+	const queued = new Uint8Array(count);
+	const regions: { mask: Mask; size: number }[] = [];
+
+	let brightest = count - 1;
+	while (regions.length < maxRegions && brightest >= 0) {
+		while (brightest >= 0 && claimed[order[brightest]] === 1) brightest -= 1;
+		if (brightest < 0) break;
+
+		const seed = order[brightest];
+		const seedLevel = levels[seed];
+		if (seedLevel < minLevel) break;
+		const stop = seedLevel - Math.round(dropShare * (seedLevel - minLevel));
+
+		let high = seedLevel;
+		buckets[seedLevel].push(seed);
+		queued[seed] = 1;
+		const members: number[] = [];
+
+		while (high >= stop) {
+			while (high >= stop && buckets[high].length === 0) high -= 1;
+			if (high < stop) break;
+
+			const index = buckets[high].pop() as number;
+			if (inRegion[index] === 1) continue;
+			inRegion[index] = 1;
+			members.push(index);
+
+			const x = index % width;
+			const y = (index - x) / width;
+			for (let dy = -1; dy <= 1; dy += 1) {
+				const nextY = y + dy;
+				if (nextY < 0 || nextY >= height) continue;
+				for (let dx = -1; dx <= 1; dx += 1) {
+					const nextX = x + dx;
+					if (nextX < 0 || nextX >= width) continue;
+					const nextIndex = nextY * width + nextX;
+					if (inRegion[nextIndex] === 1) continue;
+					if (claimed[nextIndex] === 1 || queued[nextIndex] === 1) continue;
+					queued[nextIndex] = 1;
+					const level = levels[nextIndex];
+					buckets[level].push(nextIndex);
+					if (level > high) high = level;
+				}
+			}
+		}
+
+		const mask = createMask(width, height);
+		for (const index of members) {
+			mask.data[index] = 1;
+			claimed[index] = 1;
+			inRegion[index] = 0;
+		}
+		// Frontier pixels the stop level cut adrift stay unclaimed, and are
+		// available as seeds of their own once the brighter surfaces are taken.
+		queued.fill(0);
+		for (let level = 0; level < 256; level += 1) buckets[level].length = 0;
+		if (members.length > 0) regions.push({ mask, size: members.length });
+	}
+
+	regions.sort((a, b) => b.size - a.size);
+	return regions.map((region) => region.mask);
 }
 
 export type BorderSide = "top" | "right" | "bottom" | "left";

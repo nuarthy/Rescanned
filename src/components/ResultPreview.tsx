@@ -40,11 +40,15 @@ export function ResultPreview({ pixels }: ResultPreviewProps) {
 		);
 	}
 
+	// Full width rather than max-width: the two preview passes differ in
+	// resolution but share an aspect ratio, so the box stays put and only the
+	// sharpness changes. A max-width box would snap to the small pass's own size
+	// and jump back up when the sharp pass arrives.
 	return (
 		<canvas
 			ref={canvasRef}
 			aria-label="Corrected page"
-			className="mx-auto block h-auto max-w-full rounded-lg border border-slate-800 bg-white shadow-lg shadow-slate-950/40"
+			className="mx-auto block h-auto w-full rounded-lg border border-slate-800 bg-white shadow-lg shadow-slate-950/40"
 		/>
 	);
 }

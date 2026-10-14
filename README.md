@@ -1,4 +1,4 @@
-# Document scanner
+# Rescanned
 
 A browser-based document scanner. Upload a photo of a document. The app finds
 the page corners, corrects the perspective, and downloads a flat scan. You can
@@ -45,41 +45,73 @@ upload ──► decode to canvas ──► detect page quad ──► review �
 | `src/lib/geometry.ts` | Quad ordering, convex hull, polygon simplification, largest inscribed quad, quad metrics |
 | `src/lib/detect.ts` | The detection pipeline and the candidate ranking |
 | `src/lib/perspective.ts` | Output size and the homography warp |
+| `src/lib/filters.ts` | Page filters: lighten, no shadow, black and white, high contrast |
 | `src/lib/imageFile.ts` | File, canvas, and download helpers |
+| `src/lib/scanRenderer.ts` | Runs detection and rendering on a worker, with a main-thread fallback |
+| `src/lib/scanWorker.ts` | The worker side: page detection, warp, and filtering |
 | `src/components/DocumentScanner.tsx` | The upload, review, and download flow |
 | `src/components/CropEditor.tsx` | The photo with draggable corner nodes |
 | `src/components/ResultPreview.tsx` | The corrected page |
 
 ### Detection
 
-Detection runs on a copy of the photo that is at most 640 px on the long side,
-so it stays fast on a phone. The pipeline builds two candidate quads and keeps
-the better one:
+Detection runs in the worker, on a copy of the photo that is at most 640 px on
+the long side, so the main thread stays free. Three views of the photo propose
+candidate quads, and the best one wins:
 
-- **region** — the page is the largest bright region that does not reach all
-  four borders of the frame. The backdrop is rejected this way.
+- **flood** — the page is a surface that a brightness frontier fills before a
+  dark boundary stops it. Each region starts at the brightest pixel its surface
+  still has, so no single threshold has to hold across the whole photo.
+- **region** — the page is the largest bright (or dark) region that does not
+  reach all four borders of the frame. The backdrop is rejected this way.
 - **edges** — the page border is the strongest connected ridge of image
   gradient, closed with a generous radius to bridge gaps, then eroded back so
   the outline keeps its true size.
 
 Each candidate becomes a convex hull that is simplified and reduced to the
-largest inscribed quadrilateral. The two are then ranked on three measures:
+largest inscribed quadrilateral. The candidates are then ranked on five
+measures:
 
 - how well the quad edges sit on real image gradients,
 - how close the corners are to right angles,
-- how much of the frame the quad covers.
+- how much of the frame the quad covers,
+- how far the quad stands inside the frame, so a crop that leaves nothing
+  outside it cannot read as a page,
+- how much brighter the quad is than the surface around it, on all four sides,
+  so a bright patch of wall loses to the page in front of it.
 
-A ranking below the confidence floor returns no quad, and the app shows the
-full frame instead. Detection is a convenience: the corners are always
-adjustable.
+A ranking below the confidence floor returns no quad, and the app shows the full
+frame instead. A confident wrong corner is worse than no corner: the user drags
+the nodes either way, and a wrong guess also hides that the crop is a guess.
+Detection is a convenience: the corners are always adjustable.
+
+### Filters
+
+Filters run after the warp, so the preview and the download always match.
+
+| Filter | What it does |
+| --- | --- |
+| Lighten | Stretches the top of the range so paper reaches white while ink stays dark |
+| No shadow | Balances each channel against its paper level to remove the colour cast, flattens the lighting, then deepens the ink and lifts colour |
+| Black & white | Luma grayscale |
+| High contrast B&W | Flattens the lighting, then splits the page into pure black and pure white with Otsu |
+
+Three constants in `src/lib/filters.ts` set the strength of **No shadow**:
+`CONTRAST_WHITE_POINT` (everything above this clips to white, which is what
+clears faint dirt), `CONTRAST_BLACK_POINT` (how deep the ink goes), and
+`SATURATION_BOOST` (colour vividness). Lowering the white point cleans the page
+further at the cost of faint, pale strokes.
 
 ## Limits and known gaps
 
 - Detection expects a page that does not fill the whole frame and that has some
   visible border. A page that fills the frame, or a page with no visible edge,
   falls back to the full frame.
-- The corrected output keeps the lighting of the original photo. There is no
-  contrast, brightness, or color enhancement yet.
+- A surface that is only a little brighter than the one behind it, and whose top
+  edge is hidden, comes back as not detected rather than as a guess. A
+  whiteboard on a bright wall is the usual case.
+- The photo is decoded and copied to a canvas on the main thread, which is still
+  a few hundred milliseconds for a full-resolution phone photo.
 - The output is a JPEG at quality 0.92. There is no format choice yet.
 - The layout is responsive and the corner nodes use pointer events, but mobile
   ergonomics are not finished.

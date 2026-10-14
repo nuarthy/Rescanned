@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { detectDocumentQuad, detectDocumentQuadOrFallback } from "./detect";
-import { orderQuad, type Point, type Quad, quadPoints } from "./geometry";
+import {
+	detectDocumentQuad,
+	detectDocumentQuadOrFallback,
+	findCandidates,
+} from "./detect";
+import {
+	orderQuad,
+	type Point,
+	type Quad,
+	quadBorderInset,
+	quadPoints,
+} from "./geometry";
 import type { RgbaImage } from "./pixels";
 
 /** Deterministic pseudo-random source, so a failing case always repeats. */
@@ -107,6 +117,65 @@ function photoOfDocument({
 	return { data, width, height };
 }
 
+/**
+ * A whiteboard on a wall: a bright board carrying dark writing, framed by a thin
+ * dark line, hung on a wall only a shade darker, with a dark poster covering its
+ * top edge and a dark desk across the bottom.
+ *
+ * This is the pattern that used to produce a confident crop hugging the frame:
+ * brightness cannot separate the board from the wall, the wall reaches the
+ * frame's borders, and the strongest ridges belong to the writing and the
+ * poster. Nothing here is enough to place four corners with confidence.
+ */
+function brightBoardOnBrightWall(): RgbaImage {
+	const width = 640;
+	const height = 480;
+	const data = new Uint8ClampedArray(width * height * 4);
+	const randomValue = random(31);
+
+	const board = { left: 100, right: 560, top: 45, bottom: 415 };
+	const poster = { left: 140, right: 542, top: 0, bottom: 150 };
+	const desk = 430;
+
+	const inside = (
+		x: number,
+		y: number,
+		box: { left: number; right: number; top: number; bottom: number },
+	) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+
+	for (let y = 0; y < height; y += 1) {
+		for (let x = 0; x < width; x += 1) {
+			let value: number;
+
+			if (y >= desk) {
+				value = 70;
+			} else if (inside(x, y, poster)) {
+				value = 78;
+			} else if (inside(x, y, board)) {
+				const onFrame =
+					x < board.left + 4 ||
+					x > board.right - 4 ||
+					y < board.top + 4 ||
+					y > board.bottom - 4;
+				// Writing: thin dark bars, dense enough to cover most of the board.
+				const onWriting = !onFrame && y % 14 < 4 && x % 23 > 2 && x % 23 < 19;
+				value = onFrame ? 66 : onWriting ? 92 : 205;
+			} else {
+				value = 196;
+			}
+
+			const p = (y * width + x) * 4;
+			const noisy = value + (randomValue() - 0.5) * 8;
+			data[p] = noisy;
+			data[p + 1] = noisy;
+			data[p + 2] = noisy;
+			data[p + 3] = 255;
+		}
+	}
+
+	return { data, width, height };
+}
+
 function cornerDistance(a: Point, b: Point): number {
 	return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -137,7 +206,7 @@ describe("detectDocumentQuad", () => {
 
 		expect(result.method).not.toBe("none");
 		expect(result.quad).not.toBeNull();
-		expect(result.score).toBeGreaterThanOrEqual(0.42);
+		expect(result.score).toBeGreaterThanOrEqual(0.5);
 		if (!result.quad) throw new Error("expected a quad");
 		expectQuadCloseTo(result.quad, orderQuad(PAGE), 8);
 	});
@@ -164,7 +233,10 @@ describe("detectDocumentQuad", () => {
 			br: { x: small.quad.br.x * 2, y: small.quad.br.y * 2 },
 			bl: { x: small.quad.bl.x * 2, y: small.quad.bl.y * 2 },
 		};
-		expectQuadCloseTo(doubled.quad, scaled, 4);
+		// Two candidates trace the page within a couple of working pixels of each
+		// other, and which one wins can differ between the two downsamples, so the
+		// corner tolerance allows for that tie.
+		expectQuadCloseTo(doubled.quad, scaled, 6);
 	});
 
 	it("handles a page turned well away from upright", () => {
@@ -205,6 +277,30 @@ describe("detectDocumentQuad", () => {
 			background: 120,
 		});
 		expect(detectDocumentQuad(image).method).toBe("none");
+	});
+});
+
+describe("detectDocumentQuad: a page that is hard to tell from its background", () => {
+	it("never reports a crop whose corners sit on the frame", () => {
+		const result = detectDocumentQuad(brightBoardOnBrightWall());
+
+		// The board is only a shade brighter than the wall it hangs on, its top
+		// edge is covered by a poster, and the wall runs into every border, so
+		// there is no confident answer to give. What must never come back is a
+		// confident quad hugging the frame: that reads as "the page fills the
+		// photo" and leaves the user nothing to drag.
+		if (!result.quad) return;
+		expect(quadBorderInset(result.quad, 640, 480)).toBeGreaterThan(0.02);
+	});
+
+	it("reports the winning candidate as brighter than its surroundings", () => {
+		const image = photoOfDocument({ width: 640, height: 480, page: PAGE });
+		const best = findCandidates(image).sort(
+			(a, b) => b.metrics.score - a.metrics.score,
+		)[0];
+
+		expect(best).toBeDefined();
+		expect(best.metrics.contrast).toBeGreaterThan(0);
 	});
 });
 

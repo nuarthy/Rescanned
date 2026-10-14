@@ -12,7 +12,9 @@ import {
 	type Point,
 	type Quad,
 	quadArea,
+	quadContainsPoint,
 	quadPoints,
+	translateQuad,
 	withQuadCorner,
 } from "#/lib/geometry";
 
@@ -37,10 +39,15 @@ export interface CropEditorProps {
  * Shows the photo with the crop quad on top and lets the user drag the four
  * corners.
  *
- * The canvas transform is set so all drawing and hit testing happens in image
- * pixel coordinates, which keeps the geometry identical to the values that
- * feed the perspective transform. Handle sizes are divided by that same scale
- * so they stay a constant size on screen.
+ * Two stacked canvases keep a drag cheap. The photo is scaled into its own
+ * canvas once per size, so a pointer move repaints only the overlay: the dim
+ * mask, the outline and the handles. Redrawing the photo every frame means
+ * resampling a multi-megapixel image sixty times a second, which a phone
+ * cannot keep up with.
+ *
+ * Both canvases are drawn in image pixel coordinates, so the geometry matches
+ * the values that feed the perspective transform and the handle size only has
+ * to be divided by the display scale.
  */
 export function CropEditor({
 	image,
@@ -50,8 +57,12 @@ export function CropEditor({
 	onDragChange,
 }: CropEditorProps) {
 	const containerRef = useRef<HTMLDivElement>(null);
-	const canvasRef = useRef<HTMLCanvasElement>(null);
-	const dragIndexRef = useRef<number | null>(null);
+	const photoRef = useRef<HTMLCanvasElement>(null);
+	const overlayRef = useRef<HTMLCanvasElement>(null);
+	/** Either a single corner being dragged, or the whole quad moving. */
+	const dragRef = useRef<
+		{ kind: "corner"; index: number } | { kind: "move"; from: Point } | null
+	>(null);
 	const [display, setDisplay] = useState({ width: 0, height: 0 });
 
 	useLayoutEffect(() => {
@@ -85,31 +96,43 @@ export function CropEditor({
 		};
 	}, [image]);
 
+	// Photo layer: sized and drawn once per display size. This is the only place
+	// the full-resolution photo is resampled.
 	useLayoutEffect(() => {
-		const canvas = canvasRef.current;
-		if (!canvas || display.width === 0) return;
+		const photo = photoRef.current;
+		const overlay = overlayRef.current;
+		if (!photo || !overlay || display.width === 0) return;
 
-		const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2.5);
-		const pixelWidth = Math.round(display.width * devicePixelRatio);
-		const pixelHeight = Math.round(display.height * devicePixelRatio);
-		if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
-		if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+		const ratio = Math.min(window.devicePixelRatio || 1, 2.5);
+		const pixelWidth = Math.round(display.width * ratio);
+		const pixelHeight = Math.round(display.height * ratio);
+		for (const canvas of [photo, overlay]) {
+			if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+			if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+		}
 
-		const context = canvas.getContext("2d");
+		const context = photo.getContext("2d");
+		if (!context) return;
+		const scale = display.width / image.width;
+		context.setTransform(ratio * scale, 0, 0, ratio * scale, 0, 0);
+		context.imageSmoothingQuality = "high";
+		context.clearRect(0, 0, image.width, image.height);
+		context.drawImage(image, 0, 0, image.width, image.height);
+	}, [image, display.width, display.height]);
+
+	// Overlay layer: the only thing a pointer move repaints.
+	useLayoutEffect(() => {
+		const overlay = overlayRef.current;
+		if (!overlay || display.width === 0) return;
+
+		const ratio = Math.min(window.devicePixelRatio || 1, 2.5);
+		const scale = display.width / image.width;
+		const context = overlay.getContext("2d");
 		if (!context) return;
 
-		const scale = display.width / image.width;
-		context.setTransform(
-			devicePixelRatio * scale,
-			0,
-			0,
-			devicePixelRatio * scale,
-			0,
-			0,
-		);
-		context.clearRect(0, 0, image.width, image.height);
-		context.imageSmoothingQuality = "high";
-		context.drawImage(image, 0, 0, image.width, image.height);
+		context.setTransform(1, 0, 0, 1, 0, 0);
+		context.clearRect(0, 0, overlay.width, overlay.height);
+		context.setTransform(ratio * scale, 0, 0, ratio * scale, 0, 0);
 
 		const points = quadPoints(quad);
 
@@ -146,11 +169,11 @@ export function CropEditor({
 			context.strokeStyle = "#0f172a";
 			context.stroke();
 		}
-	}, [display, image, quad, editable]);
+	}, [display.width, image.width, image.height, quad, editable]);
 
 	const toImagePoint = useCallback(
 		(clientX: number, clientY: number): Point => {
-			const canvas = canvasRef.current;
+			const canvas = overlayRef.current;
 			if (!canvas) return { x: 0, y: 0 };
 			const rect = canvas.getBoundingClientRect();
 			if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0 };
@@ -187,10 +210,20 @@ export function CropEditor({
 
 	const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
 		if (!editable) return;
-		const index = findHandle(toImagePoint(event.clientX, event.clientY));
-		if (index === null) return;
+		const point = toImagePoint(event.clientX, event.clientY);
+		const index = findHandle(point);
 
-		dragIndexRef.current = index;
+		if (index !== null) {
+			dragRef.current = { kind: "corner", index };
+		} else if (quadContainsPoint(quad, point)) {
+			// Anywhere inside moves the whole crop, which is how a wrongly
+			// detected page is brought onto the page before the corners are
+			// fine-tuned.
+			dragRef.current = { kind: "move", from: point };
+		} else {
+			return;
+		}
+
 		onDragChange?.(true);
 		event.preventDefault();
 
@@ -205,15 +238,26 @@ export function CropEditor({
 	};
 
 	const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-		const index = dragIndexRef.current;
-		if (index === null) return;
+		const drag = dragRef.current;
+		if (!drag) return;
 
-		const point = clampPointToBounds(
-			toImagePoint(event.clientX, event.clientY),
-			image.width,
-			image.height,
-		);
-		const candidate = withQuadCorner(quad, index, point);
+		const point = toImagePoint(event.clientX, event.clientY);
+
+		if (drag.kind === "move") {
+			onChange(
+				translateQuad(
+					quad,
+					point.x - drag.from.x,
+					point.y - drag.from.y,
+					image.width,
+					image.height,
+				),
+			);
+			return;
+		}
+
+		const clamped = clampPointToBounds(point, image.width, image.height);
+		const candidate = withQuadCorner(quad, drag.index, clamped);
 		const points = quadPoints(candidate);
 
 		if (!isConvex(points)) return;
@@ -225,28 +269,34 @@ export function CropEditor({
 	};
 
 	const endDrag = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-		if (dragIndexRef.current === null) return;
-		dragIndexRef.current = null;
+		if (dragRef.current === null) return;
+		dragRef.current = null;
 		if (event.currentTarget.hasPointerCapture(event.pointerId)) {
 			event.currentTarget.releasePointerCapture(event.pointerId);
 		}
 		onDragChange?.(false);
 	};
 
+	const canvasStyle = {
+		inset: 0,
+		margin: "auto",
+		width: display.width || undefined,
+		height: display.height || undefined,
+	};
+
 	return (
 		<div
 			ref={containerRef}
-			className="relative w-full"
+			className="relative w-full overflow-hidden rounded-lg shadow-lg shadow-slate-950/40"
 			style={{ height: display.height || undefined }}
 		>
+			<canvas ref={photoRef} className="absolute" style={canvasStyle} />
 			<canvas
-				ref={canvasRef}
+				ref={overlayRef}
 				aria-label="Photo with the crop corners"
-				className="block rounded-lg shadow-lg shadow-slate-950/40"
+				className="absolute block"
 				style={{
-					width: display.width || "100%",
-					height: display.height || undefined,
-					margin: "0 auto",
+					...canvasStyle,
 					touchAction: "none",
 					cursor: editable ? "grab" : "default",
 				}}

@@ -11,21 +11,17 @@ import {
 
 import { CropEditor } from "#/components/CropEditor";
 import { ResultPreview } from "#/components/ResultPreview";
-import {
-	type DetectionResult,
-	detectDocumentQuadOrFallback,
-} from "#/lib/detect";
+import type { DetectionResult } from "#/lib/detect";
+import { DOCUMENT_FILTERS, type DocumentFilter } from "#/lib/filters";
 import {
 	normalizeTurns,
 	type Quad,
 	type QuarterTurns,
 	quadsEqual,
 	rotateQuad,
-	scaleQuad,
 } from "#/lib/geometry";
 import {
 	canvasFromPixels,
-	DETECTION_DIMENSION,
 	downloadBlob,
 	encodeCanvas,
 	ImageLoadError,
@@ -38,8 +34,8 @@ import {
 	readCanvasPixels,
 	scannedFileName,
 } from "#/lib/imageFile";
-import { warpQuadToRgba } from "#/lib/perspective";
 import type { RgbaImage } from "#/lib/pixels";
+import { createScanRenderer, type ScanRenderer } from "#/lib/scanRenderer";
 
 /** Wait for the browser to paint before a long, blocking step. */
 function nextFrame(): Promise<void> {
@@ -64,12 +60,17 @@ export function DocumentScanner() {
 	const [dragging, setDragging] = useState(false);
 	/** Clockwise quarter turns applied to the corrected page. */
 	const [rotationTurns, setRotationTurns] = useState<QuarterTurns>(0);
+	const [filter, setFilter] = useState<DocumentFilter>("original");
 
-	/** Full-resolution pixels of the current source, read once per upload. */
-	const sourcePixelsRef = useRef<RgbaImage | null>(null);
+	/**
+	 * Renders the corrected page. Warping and filtering a megapixel image takes
+	 * hundreds of milliseconds on a phone, so it runs in a worker when it can.
+	 */
+	const rendererRef = useRef<ScanRenderer | null>(null);
 
 	const reset = useCallback(() => {
-		sourcePixelsRef.current = null;
+		rendererRef.current?.dispose();
+		rendererRef.current = null;
 		setSource(null);
 		setFileName(null);
 		setDetection(null);
@@ -78,6 +79,7 @@ export function DocumentScanner() {
 		setPreview(null);
 		setEditing(false);
 		setRotationTurns(0);
+		setFilter("original");
 		setError(null);
 		setBusy("idle");
 	}, []);
@@ -97,25 +99,20 @@ export function DocumentScanner() {
 
 			try {
 				const loaded = await loadImageFile(file, MAX_SOURCE_DIMENSION);
-				sourcePixelsRef.current = readCanvasPixels(loaded.canvas);
 
-				// Detection runs on a small copy; the quad is scaled back up so the
-				// editor and the warp always speak in source pixels.
-				const detectionPixels = readCanvasPixels(
-					loaded.canvas,
-					DETECTION_DIMENSION,
-				);
-				const result = detectDocumentQuadOrFallback(detectionPixels);
-				const scaled = scaleQuad(
-					result.quad,
-					loaded.width / detectionPixels.width,
-					loaded.height / detectionPixels.height,
-				);
+				// One renderer per photo, so a worker from a previous photo cannot
+				// answer for this one. It also finds the page, off the main
+				// thread, and reports corners in source pixels.
+				rendererRef.current?.dispose();
+				const renderer = createScanRenderer();
+				rendererRef.current = renderer;
+				renderer.setSource(readCanvasPixels(loaded.canvas));
+				const result = await renderer.detect();
 
 				setSource(loaded);
 				setDetection(result);
-				setDetectedQuad(scaled);
-				setQuad(scaled);
+				setDetectedQuad(result.quad);
+				setQuad(result.quad);
 				setEditing(false);
 			} catch (cause) {
 				reset();
@@ -159,42 +156,62 @@ export function DocumentScanner() {
 	// result. When the drag ends the page catches up in two passes: a cheap one
 	// so the update looks immediate, then the full preview resolution.
 	useEffect(() => {
-		const pixels = sourcePixelsRef.current;
-		if (!source || !outputQuad || !pixels) {
+		const renderer = rendererRef.current;
+		if (!source || !outputQuad || !renderer) {
 			setPreview(null);
 			return;
 		}
 		if (dragging) return;
 
 		let cancelled = false;
-		const quick = window.setTimeout(() => {
-			if (cancelled) return;
-			setPreview(warpQuadToRgba(pixels, outputQuad, QUICK_PREVIEW_DIMENSION));
-		}, 0);
-		const full = window.setTimeout(() => {
-			if (cancelled) return;
-			setPreview(warpQuadToRgba(pixels, outputQuad, PREVIEW_DIMENSION));
-		}, 150);
+		const request = (maxDimension: number) => {
+			renderer
+				.render({ quad: outputQuad, maxDimension, filter })
+				.then((image) => {
+					// A render that finished after a newer one started is dropped.
+					if (!cancelled) setPreview(image);
+				})
+				.catch(() => {
+					// Superseded renders need no report; a render that cannot run at
+					// all still surfaces through the download path.
+				});
+		};
+
+		const quick = window.setTimeout(() => request(QUICK_PREVIEW_DIMENSION), 0);
+		const full = window.setTimeout(() => request(PREVIEW_DIMENSION), 150);
 
 		return () => {
 			cancelled = true;
 			window.clearTimeout(quick);
 			window.clearTimeout(full);
 		};
-	}, [source, outputQuad, dragging]);
+	}, [source, outputQuad, dragging, filter]);
+
+	// Release the worker when the scanner goes away.
+	useEffect(
+		() => () => {
+			rendererRef.current?.dispose();
+			rendererRef.current = null;
+		},
+		[],
+	);
 
 	const handleDownload = async () => {
-		const pixels = sourcePixelsRef.current;
-		if (!pixels || !outputQuad) return;
+		const renderer = rendererRef.current;
+		if (!renderer || !outputQuad) return;
 
 		setBusy("exporting");
 		setError(null);
 		await nextFrame();
 
 		try {
-			const warped = warpQuadToRgba(pixels, outputQuad, MAX_SOURCE_DIMENSION);
+			const rendered = await renderer.render({
+				quad: outputQuad,
+				maxDimension: MAX_SOURCE_DIMENSION,
+				filter,
+			});
 			const blob = await encodeCanvas(
-				canvasFromPixels(warped),
+				canvasFromPixels(rendered),
 				"image/jpeg",
 				0.92,
 			);
@@ -218,9 +235,18 @@ export function DocumentScanner() {
 	return (
 		<div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6">
 			<header className="mb-8">
-				<h1 className="text-2xl font-semibold tracking-tight text-slate-100 sm:text-3xl">
-					Document scanner
-				</h1>
+				<div className="flex items-center gap-3">
+					{/* Decorative: the heading beside it already names the app. */}
+					<img
+						src="/rescanned-mark.svg"
+						alt=""
+						aria-hidden="true"
+						className="h-9 w-auto sm:h-10"
+					/>
+					<h1 className="text-2xl font-semibold tracking-tight text-slate-100 sm:text-3xl">
+						Rescanned
+					</h1>
+				</div>
 				<p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-base">
 					Upload a photo of a document. The page corners are found for you; if
 					they are off, open the editor and drag them. Then download the
@@ -259,15 +285,9 @@ export function DocumentScanner() {
 							</span>
 						</div>
 
-						<CropEditor
-							image={source.canvas}
-							quad={quad}
-							editable={editing}
-							onChange={setQuad}
-							onDragChange={setDragging}
-						/>
-
-						<div className="mt-4 flex flex-wrap gap-2">
+						{/* Controls sit above the photo: rotating the result changes its
+						    height a lot, so anything below it would move under the finger. */}
+						<div className="mb-3 flex flex-wrap gap-2">
 							<button
 								type="button"
 								className={primaryButton}
@@ -290,9 +310,17 @@ export function DocumentScanner() {
 							</button>
 						</div>
 
+						<CropEditor
+							image={source.canvas}
+							quad={quad}
+							editable={editing}
+							onChange={setQuad}
+							onDragChange={setDragging}
+						/>
+
 						<p className="mt-3 text-xs text-slate-500">
 							{editing
-								? "Drag any corner node to the page corner."
+								? "Drag a corner node, or drag inside the crop to move the whole frame."
 								: "Press Edit corners to move the crop nodes."}
 						</p>
 
@@ -303,17 +331,22 @@ export function DocumentScanner() {
 						<h2 className="mb-3 text-sm font-medium tracking-wide text-slate-300 uppercase">
 							Result
 						</h2>
-						{/* Faded while a corner moves, to show the page is catching up. */}
-						<div
-							className={
-								dragging
-									? "opacity-40 transition-opacity"
-									: "transition-opacity"
-							}
-						>
-							<ResultPreview pixels={preview} />
+
+						<div className="mb-2 flex flex-wrap gap-2">
+							{DOCUMENT_FILTERS.map((option) => (
+								<button
+									key={option.id}
+									type="button"
+									aria-pressed={filter === option.id}
+									className={filter === option.id ? activeChip : inactiveChip}
+									onClick={() => setFilter(option.id)}
+								>
+									{option.label}
+								</button>
+							))}
 						</div>
-						<div className="mt-4 flex w-full items-center gap-2 sm:w-auto">
+
+						<div className="mb-3 flex w-full items-center gap-2 sm:w-auto">
 							<button
 								type="button"
 								aria-label="Rotate 90 degrees anticlockwise"
@@ -344,6 +377,17 @@ export function DocumentScanner() {
 							>
 								{busy === "exporting" ? "Preparing…" : "Download"}
 							</button>
+						</div>
+
+						{/* Faded while a corner moves, to show the page is catching up. */}
+						<div
+							className={
+								dragging
+									? "opacity-40 transition-opacity"
+									: "transition-opacity"
+							}
+						>
+							<ResultPreview pixels={preview} />
 						</div>
 					</section>
 				</div>
@@ -421,6 +465,10 @@ function UploadZone({
 
 const primaryButton =
 	"inline-flex items-center rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50";
+const activeChip =
+	"rounded-full border border-sky-400 bg-sky-500/20 px-3 py-1 text-xs font-medium text-sky-100";
+const inactiveChip =
+	"rounded-full border border-slate-700 px-3 py-1 text-xs font-medium text-slate-300 transition hover:border-slate-500 hover:bg-slate-800/60";
 const iconButton =
 	"inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-700 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/60";
 const secondaryButton =

@@ -10,8 +10,6 @@ import type { RgbaImage } from "./pixels";
 
 /** Longest side kept from the uploaded photo, to stay inside canvas limits. */
 export const MAX_SOURCE_DIMENSION = 3500;
-/** Longest side of the first, cheap detection pass. */
-export const DETECTION_DIMENSION = 640;
 /** Longest side of the settled corrected preview. */
 export const PREVIEW_DIMENSION = 1000;
 /** Longest side of the first, cheap preview pass. */
@@ -52,7 +50,10 @@ export async function loadImageFile(
 		const canvas = document.createElement("canvas");
 		canvas.width = width;
 		canvas.height = height;
-		const context = canvas.getContext("2d", { willReadFrequently: true });
+		// No `willReadFrequently` here: that asks for a CPU-backed canvas, and this
+		// one is drawn repeatedly for display. WebKit honours the hint, and drawing
+		// from a software canvas every frame is what makes an iPhone stutter.
+		const context = canvas.getContext("2d");
 		if (!context) throw new ImageLoadError("Canvas 2D is unavailable.");
 		context.imageSmoothingQuality = "high";
 		context.drawImage(image, 0, 0, width, height);
@@ -79,36 +80,27 @@ export function readCanvasPixels(
 	canvas: HTMLCanvasElement,
 	maxDimension?: number,
 ): RgbaImage {
-	const context = canvas.getContext("2d", { willReadFrequently: true });
-	if (!context) throw new ImageLoadError("Canvas 2D is unavailable.");
-	const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+	const longest = Math.max(canvas.width, canvas.height);
+	const scale =
+		maxDimension && longest > maxDimension ? maxDimension / longest : 1;
+	const width = Math.max(1, Math.round(canvas.width * scale));
+	const height = Math.max(1, Math.round(canvas.height * scale));
 
-	const pixels: RgbaImage = {
+	// Reading pixels uses its own scratch canvas: the source canvas stays
+	// hardware accelerated, and the downscale happens in the same step.
+	const scratch = document.createElement("canvas");
+	scratch.width = width;
+	scratch.height = height;
+	const context = scratch.getContext("2d", { willReadFrequently: true });
+	if (!context) throw new ImageLoadError("Canvas 2D is unavailable.");
+	context.imageSmoothingQuality = "high";
+	context.drawImage(canvas, 0, 0, width, height);
+	const imageData = context.getImageData(0, 0, width, height);
+
+	return {
 		data: imageData.data,
 		width: imageData.width,
 		height: imageData.height,
-	};
-
-	if (!maxDimension || Math.max(pixels.width, pixels.height) <= maxDimension) {
-		return pixels;
-	}
-
-	// Downscale through an offscreen canvas; the browser's filter is faster and
-	// better than anything hand-rolled here.
-	const scale = maxDimension / Math.max(pixels.width, pixels.height);
-	const small = document.createElement("canvas");
-	small.width = Math.max(1, Math.round(pixels.width * scale));
-	small.height = Math.max(1, Math.round(pixels.height * scale));
-	const smallContext = small.getContext("2d", { willReadFrequently: true });
-	if (!smallContext) throw new ImageLoadError("Canvas 2D is unavailable.");
-	smallContext.imageSmoothingQuality = "high";
-	smallContext.drawImage(canvas, 0, 0, small.width, small.height);
-	const smallData = smallContext.getImageData(0, 0, small.width, small.height);
-
-	return {
-		data: smallData.data,
-		width: smallData.width,
-		height: smallData.height,
 	};
 }
 
