@@ -33,9 +33,11 @@ The app serves on <http://localhost:3000>.
 
 ## Deployment
 
-The app deploys to Cloudflare Workers through `@cloudflare/vite-plugin`. The
-plugin also runs the app inside `workerd` for `vite dev` and `vite preview`, so
-local runs behave like production.
+The app deploys to Cloudflare Workers through `@cloudflare/vite-plugin`, which
+runs for `vite build` and `vite preview`: it produces the Worker bundle and
+serves that bundle inside `workerd`, so a preview behaves like production.
+`vite dev` stays on the plain Vite server, and `wrangler dev --config
+dist/server/wrangler.json` runs the real Worker locally instead.
 
 `wrangler.jsonc` holds the Worker name, its `main` entry (the TanStack Start
 server entry), the `nodejs_compat` flag, and the custom domain. On the first
