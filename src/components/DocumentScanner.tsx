@@ -1,4 +1,4 @@
-import { Check, Copy, RotateCcw, RotateCw } from "lucide-react";
+import { Check, Copy, RotateCcw, RotateCw, Share2 } from "lucide-react";
 import {
 	type ChangeEvent,
 	type DragEvent as ReactDragEvent,
@@ -61,8 +61,8 @@ export function DocumentScanner() {
 	/** Clockwise quarter turns applied to the corrected page. */
 	const [rotationTurns, setRotationTurns] = useState<QuarterTurns>(0);
 	const [filter, setFilter] = useState<DocumentFilter>("original");
-	/** Momentary tick on the copy button, so the click has a visible result. */
-	const [copied, setCopied] = useState(false);
+	/** Momentary tick on the hand-off button, so the tap has a visible result. */
+	const [handed, setHanded] = useState(false);
 
 	/**
 	 * Renders the corrected page. Warping and filtering a megapixel image takes
@@ -229,8 +229,34 @@ export function DocumentScanner() {
 		}
 	};
 
-	const handleCopy = useCallback(async () => {
+	// iOS keeps a page's clipboard write inside the browser's own app scope, so
+	// the write resolves and a paste in another app still comes up empty. Read
+	// after mount, so the server-rendered button matches the first client pass.
+	const [shareSheet, setShareSheet] = useState(false);
+	useEffect(() => setShareSheet(prefersShareSheet()), []);
+
+	const handleHandOff = useCallback(async () => {
 		if (!preview) return;
+		const canvas = canvasFromPixels(preview);
+		const name = scannedFileName(fileName ?? "scan", "png");
+
+		if (shareSheet) {
+			try {
+				// The share sheet has to start inside the tap, so this encode is
+				// synchronous. It reaches Photos, Files, and messaging apps, and
+				// it offers Copy itself.
+				await navigator.share({ files: [pngFile(canvas, name)] });
+				setError(null);
+				setHanded(true);
+				return;
+			} catch (cause) {
+				// Closing the sheet is not a failure.
+				if (cause instanceof DOMException && cause.name === "AbortError")
+					return;
+				// Anything else falls through to the clipboard.
+			}
+		}
+
 		if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
 			setError("This browser cannot copy an image. Use Download instead.");
 			return;
@@ -240,7 +266,7 @@ export function DocumentScanner() {
 
 		// Encode the pixels already on screen: no re-render and no worker round
 		// trip, so a copy costs one PNG encode of the preview.
-		const png = encodeCanvas(canvasFromPixels(preview), "image/png");
+		const png = encodeCanvas(canvas, "image/png");
 
 		try {
 			try {
@@ -256,18 +282,18 @@ export function DocumentScanner() {
 					new ClipboardItem({ "image/png": await png }),
 				]);
 			}
-			setCopied(true);
+			setHanded(true);
 		} catch {
 			setError("The image could not be copied. Use Download instead.");
 		}
-	}, [preview]);
+	}, [preview, shareSheet, fileName]);
 
 	// The tick is feedback only; it clears itself.
 	useEffect(() => {
-		if (!copied) return;
-		const timer = window.setTimeout(() => setCopied(false), 1500);
+		if (!handed) return;
+		const timer = window.setTimeout(() => setHanded(false), 1500);
 		return () => window.clearTimeout(timer);
-	}, [copied]);
+	}, [handed]);
 
 	const changedFromDetection =
 		quad !== null &&
@@ -411,10 +437,11 @@ export function DocumentScanner() {
 							>
 								<RotateCw className="h-5 w-5" aria-hidden="true" />
 							</button>
-							<CopyButton
-								copied={copied}
+							<HandOffButton
+								share={shareSheet}
+								handed={handed}
 								disabled={!preview}
-								onCopy={handleCopy}
+								onPress={handleHandOff}
 							/>
 							<button
 								type="button"
@@ -443,31 +470,79 @@ export function DocumentScanner() {
 	);
 }
 
-function CopyButton({
-	copied,
+function HandOffButton({
+	share,
+	handed,
 	disabled,
-	onCopy,
+	onPress,
 }: {
-	copied: boolean;
+	share: boolean;
+	handed: boolean;
 	disabled: boolean;
-	onCopy: () => Promise<void>;
+	onPress: () => Promise<void>;
 }) {
+	const label = share ? "Share or copy image" : "Copy image";
+	const done = share ? "Image shared" : "Image copied";
 	return (
 		<button
 			type="button"
-			aria-label={copied ? "Image copied" : "Copy image"}
-			title={copied ? "Copied" : "Copy image"}
+			aria-label={handed ? done : label}
+			title={handed ? done : label}
 			className={iconButton}
 			disabled={disabled}
-			onClick={() => void onCopy()}
+			onClick={() => void onPress()}
 		>
-			{copied ? (
+			{handed ? (
 				<Check className="h-5 w-5 text-emerald-300" aria-hidden="true" />
+			) : share ? (
+				<Share2 className="h-5 w-5" aria-hidden="true" />
 			) : (
 				<Copy className="h-5 w-5" aria-hidden="true" />
 			)}
 		</button>
 	);
+}
+
+/**
+ * Whether the hand-off has to go through the share sheet.
+ *
+ * On iOS a page writes to a pasteboard owned by the browser's own app, and since
+ * iOS 16 the receiving app also asks permission before it reads from another
+ * app, so a resolved clipboard write can still leave a paste empty. The share
+ * sheet reaches Photos, Files, and messaging apps, and offers Copy itself.
+ */
+function prefersShareSheet(): boolean {
+	if (typeof navigator === "undefined") return false;
+	if (typeof navigator.share !== "function") return false;
+
+	const isIos =
+		/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+		(navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+	if (!isIos) return false;
+
+	if (typeof navigator.canShare !== "function") return true;
+	try {
+		const probe = new File([new Uint8Array(1)], "probe.png", {
+			type: "image/png",
+		});
+		return navigator.canShare({ files: [probe] });
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * A PNG file built without awaiting anything.
+ *
+ * The share sheet has to open inside the tap, so the encode cannot be the
+ * asynchronous `toBlob`.
+ */
+function pngFile(canvas: HTMLCanvasElement, name: string): File {
+	const dataUrl = canvas.toDataURL("image/png");
+	const binary = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+	return new File([bytes], name, { type: "image/png" });
 }
 
 function DetectionNote({ detection }: { detection: DetectionResult }) {

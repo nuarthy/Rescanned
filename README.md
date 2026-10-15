@@ -128,6 +128,14 @@ one encode of the preview and nothing else: no re-render and no worker round
 trip. The clipboard call is made inside the click, which WebKit requires, and a
 browser that cannot write images gets a message pointing at Download instead.
 
+On iOS the button uses the share sheet instead, and shows a share icon. iOS keeps
+a page's clipboard write inside the browser's own app, and since iOS 16 the
+receiving app also has to be allowed to read another app's pasteboard, so a
+resolved write can still leave a paste empty even though the promise fulfilled.
+The share sheet reaches Photos, Files, and messaging apps, and offers Copy
+itself. It has to open inside the tap, so that path encodes with the synchronous
+`toDataURL` rather than `toBlob`.
+
 **Download** renders the page again at full source resolution in the worker and
 encodes a JPEG at quality 0.92, which takes longer and gives a bigger file.
 
