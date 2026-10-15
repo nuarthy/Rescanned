@@ -113,34 +113,49 @@ function drawLoupe(
 		);
 	}
 
-	// Frame.
-	context.lineWidth = Math.max(1, ratio);
+	// Frame: thick enough to read against white paper and against a dark photo.
+	const frameWidth = Math.max(2, 1.5 * ratio);
+	context.lineWidth = frameWidth;
 	context.strokeStyle = ACCENT;
 	context.strokeRect(
-		left + context.lineWidth / 2,
-		top + context.lineWidth / 2,
-		size - context.lineWidth,
-		size - context.lineWidth,
+		left + frameWidth / 2,
+		top + frameWidth / 2,
+		size - frameWidth,
+		size - frameWidth,
 	);
 
 	// Crosshair: full-width arms with a gap at the middle, so the node underneath
-	// stays visible.
+	// stays visible. Each pass draws a dark arm under a light one, because a
+	// light line alone vanishes over a dark line of text and a dark line alone
+	// vanishes over the paper.
 	const centreX = left + size / 2;
 	const centreY = top + size / 2;
 	const gap = 7 * ratio;
-	const arm = size / 2;
-	context.strokeStyle = "rgba(226, 232, 240, 0.9)";
-	context.beginPath();
-	context.moveTo(centreX - arm, centreY);
-	context.lineTo(centreX - gap, centreY);
-	context.moveTo(centreX + gap, centreY);
-	context.lineTo(centreX + arm, centreY);
-	context.moveTo(centreX, centreY - arm);
-	context.lineTo(centreX, centreY - gap);
-	context.moveTo(centreX, centreY + gap);
-	context.lineTo(centreX, centreY + arm);
-	context.stroke();
+	const arm = size / 2 - 8 * ratio;
+	const arms = () => {
+		context.beginPath();
+		context.moveTo(centreX - arm, centreY);
+		context.lineTo(centreX - gap, centreY);
+		context.moveTo(centreX + gap, centreY);
+		context.lineTo(centreX + arm, centreY);
+		context.moveTo(centreX, centreY - arm);
+		context.lineTo(centreX, centreY - gap);
+		context.moveTo(centreX, centreY + gap);
+		context.lineTo(centreX, centreY + arm);
+		context.stroke();
+	};
 
+	context.lineWidth = Math.max(3.5, 3.5 * ratio);
+	context.strokeStyle = "rgba(2, 6, 23, 0.75)";
+	arms();
+	context.lineWidth = Math.max(1.5, 1.5 * ratio);
+	context.strokeStyle = "rgba(248, 250, 252, 0.98)";
+	arms();
+
+	context.beginPath();
+	context.arc(centreX, centreY, Math.max(2.5, 2.5 * ratio), 0, Math.PI * 2);
+	context.fillStyle = "rgba(2, 6, 23, 0.75)";
+	context.fill();
 	context.beginPath();
 	context.arc(centreX, centreY, Math.max(1.5, 1.5 * ratio), 0, Math.PI * 2);
 	context.fillStyle = ACCENT;
