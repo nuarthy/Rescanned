@@ -121,23 +121,22 @@ clears faint dirt), `CONTRAST_BLACK_POINT` (how deep the ink goes), and
 `SATURATION_BOOST` (colour vividness). Lowering the white point cleans the page
 further at the cost of faint, pale strokes.
 
-### Copy and download
+### Copy or save the preview
 
-**Copy** puts the pixels already on screen on the clipboard as a PNG, so it costs
-one encode of the preview and nothing else: no re-render and no worker round
-trip. The clipboard call is made inside the click, which WebKit requires, and a
-browser that cannot write images gets a message pointing at Download instead.
+The corrected page is an `<img>`, not a canvas, so the device's own menu works on
+it: right-click and **Copy image** on a desktop, press and hold and **Copy** or
+**Save to Photos** on a phone. The browser's own menu puts every representation
+on the system clipboard that other apps look for. A page's own clipboard call
+does not reach that far: on iOS the write lands in an app-scoped pasteboard, and
+WebKit still resolves the promise, so a paste elsewhere comes up empty.
 
-On iOS the button uses the share sheet instead, and shows a share icon. iOS keeps
-a page's clipboard write inside the browser's own app, and since iOS 16 the
-receiving app also has to be allowed to read another app's pasteboard, so a
-resolved write can still leave a paste empty even though the promise fulfilled.
-The share sheet reaches Photos, Files, and messaging apps, and offers Copy
-itself. It has to open inside the tap, so that path encodes with the synchronous
-`toDataURL` rather than `toBlob`.
+The image is the preview, up to 1000 px on the long side, encoded as JPEG. The
+worker does the encoding, so a new preview costs the main thread nothing but a
+new object URL; without a worker the same encode runs on the main thread. Both
+paths produce the same bytes.
 
-**Download** renders the page again at full source resolution in the worker and
-encodes a JPEG at quality 0.92, which takes longer and gives a bigger file.
+**Download** renders the page again at full source resolution and encodes a JPEG
+at quality 0.92, which takes longer and gives a bigger file.
 
 ## Limits and known gaps
 

@@ -7,20 +7,32 @@
 
 import { type DetectionResult, detectDocumentQuadOrFallback } from "./detect";
 import { applyFilter } from "./filters";
+import { canvasFromPixels, encodeCanvas } from "./imageFile";
 import { warpQuadToRgba } from "./perspective";
 import type { RgbaImage } from "./pixels";
 import type {
+	RenderImageRequest,
 	RenderRequest,
 	ScanWorkerRequest,
 	ScanWorkerResponse,
 } from "./scanWorker";
+
+/** Type and quality for the preview image the user can hold and copy. */
+export const PREVIEW_IMAGE = { type: "image/jpeg", quality: 0.9 } as const;
 
 export interface ScanRenderer {
 	/** Store the source pixels. Safe to call again for a new photo. */
 	setSource(pixels: RgbaImage): void;
 	/** Find the page. Corners come back in the coordinates of the source. */
 	detect(): Promise<DetectionResult>;
+	/** Warped and filtered pixels, for a full-resolution export. */
 	render(request: RenderRequest): Promise<RgbaImage>;
+	/**
+	 * The same page as an encoded image, for a preview that only has to be
+	 * displayed and held. The worker encodes it when it can, so a preview change
+	 * costs the main thread nothing but a new object URL.
+	 */
+	renderImage(request: RenderImageRequest): Promise<Blob>;
 	dispose(): void;
 }
 
@@ -31,6 +43,17 @@ function renderOnMainThread(
 	return applyFilter(
 		warpQuadToRgba(source, request.quad, request.maxDimension),
 		request.filter,
+	);
+}
+
+function encodeOnMainThread(
+	pixels: RgbaImage,
+	request: RenderImageRequest,
+): Promise<Blob> {
+	return encodeCanvas(
+		canvasFromPixels(pixels),
+		request.encodeType,
+		request.quality,
 	);
 }
 
@@ -91,9 +114,27 @@ class WorkerRenderer {
 			...request,
 		});
 		if (response.type !== "rendered") {
-			throw new Error("The worker answered a render with a detection.");
+			throw new Error("The worker answered a render with another request.");
 		}
 		return response.image;
+	}
+
+	async renderImage(request: RenderImageRequest): Promise<Blob | null> {
+		this.nextId += 1;
+		const response = await this.send({
+			type: "renderImage",
+			id: this.nextId,
+			...request,
+		});
+		if (response.type !== "image") {
+			throw new Error(
+				"The worker answered an image render with another request.",
+			);
+		}
+		if (response.bytes === null) return null;
+		return new Blob([response.bytes], {
+			type: response.contentType ?? request.encodeType,
+		});
 	}
 
 	dispose(): void {
@@ -166,6 +207,26 @@ class ResilientRenderer implements ScanRenderer {
 
 		if (!this.source) throw new Error("No source image to render.");
 		return renderOnMainThread(this.source, request);
+	}
+
+	async renderImage(request: RenderImageRequest): Promise<Blob> {
+		const source = this.source;
+		if (!source) throw new Error("No source image to render.");
+
+		if (!this.workerFailed && this.worker) {
+			try {
+				const blob = await this.worker.renderImage(request);
+				if (blob) return blob;
+				// The worker could not encode; it warped the page for us. Reuse it
+				// rather than warping twice.
+				const pixels = await this.worker.render(request);
+				return await encodeOnMainThread(pixels, request);
+			} catch {
+				this.dropWorker();
+			}
+		}
+
+		return encodeOnMainThread(renderOnMainThread(source, request), request);
 	}
 
 	dispose(): void {

@@ -1,4 +1,4 @@
-import { Check, Copy, RotateCcw, RotateCw, Share2 } from "lucide-react";
+import { RotateCcw, RotateCw } from "lucide-react";
 import {
 	type ChangeEvent,
 	type DragEvent as ReactDragEvent,
@@ -34,8 +34,11 @@ import {
 	readCanvasPixels,
 	scannedFileName,
 } from "#/lib/imageFile";
-import type { RgbaImage } from "#/lib/pixels";
-import { createScanRenderer, type ScanRenderer } from "#/lib/scanRenderer";
+import {
+	createScanRenderer,
+	PREVIEW_IMAGE,
+	type ScanRenderer,
+} from "#/lib/scanRenderer";
 
 /** Wait for the browser to paint before a long, blocking step. */
 function nextFrame(): Promise<void> {
@@ -55,14 +58,13 @@ export function DocumentScanner() {
 	const [editing, setEditing] = useState(false);
 	const [busy, setBusy] = useState<BusyState>("idle");
 	const [error, setError] = useState<string | null>(null);
-	const [preview, setPreview] = useState<RgbaImage | null>(null);
+	/** Encoded preview image, the thing the user holds to copy or save. */
+	const [preview, setPreview] = useState<Blob | null>(null);
 	const [dragActive, setDragActive] = useState(false);
 	const [dragging, setDragging] = useState(false);
 	/** Clockwise quarter turns applied to the corrected page. */
 	const [rotationTurns, setRotationTurns] = useState<QuarterTurns>(0);
 	const [filter, setFilter] = useState<DocumentFilter>("original");
-	/** Momentary tick on the hand-off button, so the tap has a visible result. */
-	const [handed, setHanded] = useState(false);
 
 	/**
 	 * Renders the corrected page. Warping and filtering a megapixel image takes
@@ -168,7 +170,13 @@ export function DocumentScanner() {
 		let cancelled = false;
 		const request = (maxDimension: number) => {
 			renderer
-				.render({ quad: outputQuad, maxDimension, filter })
+				.renderImage({
+					quad: outputQuad,
+					maxDimension,
+					filter,
+					encodeType: PREVIEW_IMAGE.type,
+					quality: PREVIEW_IMAGE.quality,
+				})
 				.then((image) => {
 					// A render that finished after a newer one started is dropped.
 					if (!cancelled) setPreview(image);
@@ -229,72 +237,6 @@ export function DocumentScanner() {
 		}
 	};
 
-	// iOS keeps a page's clipboard write inside the browser's own app scope, so
-	// the write resolves and a paste in another app still comes up empty. Read
-	// after mount, so the server-rendered button matches the first client pass.
-	const [shareSheet, setShareSheet] = useState(false);
-	useEffect(() => setShareSheet(prefersShareSheet()), []);
-
-	const handleHandOff = useCallback(async () => {
-		if (!preview) return;
-		const canvas = canvasFromPixels(preview);
-		const name = scannedFileName(fileName ?? "scan", "png");
-
-		if (shareSheet) {
-			try {
-				// The share sheet has to start inside the tap, so this encode is
-				// synchronous. It reaches Photos, Files, and messaging apps, and
-				// it offers Copy itself.
-				await navigator.share({ files: [pngFile(canvas, name)] });
-				setError(null);
-				setHanded(true);
-				return;
-			} catch (cause) {
-				// Closing the sheet is not a failure.
-				if (cause instanceof DOMException && cause.name === "AbortError")
-					return;
-				// Anything else falls through to the clipboard.
-			}
-		}
-
-		if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
-			setError("This browser cannot copy an image. Use Download instead.");
-			return;
-		}
-
-		setError(null);
-
-		// Encode the pixels already on screen: no re-render and no worker round
-		// trip, so a copy costs one PNG encode of the preview.
-		const png = encodeCanvas(canvas, "image/png");
-
-		try {
-			try {
-				// WebKit rejects a clipboard write that begins after an await, so
-				// the promise goes straight into ClipboardItem and the write stays
-				// inside the click.
-				await navigator.clipboard.write([
-					new ClipboardItem({ "image/png": png }),
-				]);
-			} catch {
-				// Firefox takes a resolved Blob instead of a promise.
-				await navigator.clipboard.write([
-					new ClipboardItem({ "image/png": await png }),
-				]);
-			}
-			setHanded(true);
-		} catch {
-			setError("The image could not be copied. Use Download instead.");
-		}
-	}, [preview, shareSheet, fileName]);
-
-	// The tick is feedback only; it clears itself.
-	useEffect(() => {
-		if (!handed) return;
-		const timer = window.setTimeout(() => setHanded(false), 1500);
-		return () => window.clearTimeout(timer);
-	}, [handed]);
-
 	const changedFromDetection =
 		quad !== null &&
 		detectedQuad !== null &&
@@ -317,8 +259,9 @@ export function DocumentScanner() {
 				</div>
 				<p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-base">
 					Upload a photo of a document. The page corners are found for you; if
-					they are off, open the editor and drag them. Then copy or download the
-					straightened scan.
+					they are off, open the editor and drag them. Then hold the
+					straightened page to copy or save it, or download the full-resolution
+					scan.
 				</p>
 			</header>
 
@@ -437,12 +380,6 @@ export function DocumentScanner() {
 							>
 								<RotateCw className="h-5 w-5" aria-hidden="true" />
 							</button>
-							<HandOffButton
-								share={shareSheet}
-								handed={handed}
-								disabled={!preview}
-								onPress={handleHandOff}
-							/>
 							<button
 								type="button"
 								className={`${primaryButton} flex-1 justify-center sm:flex-none`}
@@ -461,88 +398,19 @@ export function DocumentScanner() {
 									: "transition-opacity"
 							}
 						>
-							<ResultPreview pixels={preview} />
+							<ResultPreview image={preview} />
 						</div>
+
+						<p className="mt-3 text-xs text-slate-500">
+							{preview
+								? "Right-click or press and hold the page to copy or save it. Download gives the full-resolution scan."
+								: "The corrected page appears here."}
+						</p>
 					</section>
 				</div>
 			)}
 		</div>
 	);
-}
-
-function HandOffButton({
-	share,
-	handed,
-	disabled,
-	onPress,
-}: {
-	share: boolean;
-	handed: boolean;
-	disabled: boolean;
-	onPress: () => Promise<void>;
-}) {
-	const label = share ? "Share or copy image" : "Copy image";
-	const done = share ? "Image shared" : "Image copied";
-	return (
-		<button
-			type="button"
-			aria-label={handed ? done : label}
-			title={handed ? done : label}
-			className={iconButton}
-			disabled={disabled}
-			onClick={() => void onPress()}
-		>
-			{handed ? (
-				<Check className="h-5 w-5 text-emerald-300" aria-hidden="true" />
-			) : share ? (
-				<Share2 className="h-5 w-5" aria-hidden="true" />
-			) : (
-				<Copy className="h-5 w-5" aria-hidden="true" />
-			)}
-		</button>
-	);
-}
-
-/**
- * Whether the hand-off has to go through the share sheet.
- *
- * On iOS a page writes to a pasteboard owned by the browser's own app, and since
- * iOS 16 the receiving app also asks permission before it reads from another
- * app, so a resolved clipboard write can still leave a paste empty. The share
- * sheet reaches Photos, Files, and messaging apps, and offers Copy itself.
- */
-function prefersShareSheet(): boolean {
-	if (typeof navigator === "undefined") return false;
-	if (typeof navigator.share !== "function") return false;
-
-	const isIos =
-		/iPad|iPhone|iPod/.test(navigator.userAgent) ||
-		(navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-	if (!isIos) return false;
-
-	if (typeof navigator.canShare !== "function") return true;
-	try {
-		const probe = new File([new Uint8Array(1)], "probe.png", {
-			type: "image/png",
-		});
-		return navigator.canShare({ files: [probe] });
-	} catch {
-		return false;
-	}
-}
-
-/**
- * A PNG file built without awaiting anything.
- *
- * The share sheet has to open inside the tap, so the encode cannot be the
- * asynchronous `toBlob`.
- */
-function pngFile(canvas: HTMLCanvasElement, name: string): File {
-	const dataUrl = canvas.toDataURL("image/png");
-	const binary = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-	return new File([bytes], name, { type: "image/png" });
 }
 
 function DetectionNote({ detection }: { detection: DetectionResult }) {
@@ -619,6 +487,6 @@ const activeChip =
 const inactiveChip =
 	"rounded-full border border-slate-700 px-3 py-1 text-xs font-medium text-slate-300 transition hover:border-slate-500 hover:bg-slate-800/60";
 const iconButton =
-	"inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-700 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-700 disabled:hover:bg-transparent";
+	"inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-700 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/60";
 const secondaryButton =
 	"inline-flex items-center rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-40";
