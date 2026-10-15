@@ -69,7 +69,7 @@ upload ──► decode to canvas ──► detect page quad ──► review �
 | `src/lib/scanRenderer.ts` | Runs detection and rendering on a worker, with a main-thread fallback |
 | `src/lib/scanWorker.ts` | The worker side: page detection, warp, and filtering |
 | `src/components/DocumentScanner.tsx` | The upload, review, and download flow |
-| `src/components/CropEditor.tsx` | The photo with draggable corner nodes |
+| `src/components/CropEditor.tsx` | The photo with draggable corner nodes and a magnifier while a corner moves |
 | `src/components/ResultPreview.tsx` | The corrected page |
 
 ### Detection
@@ -120,6 +120,16 @@ Three constants in `src/lib/filters.ts` set the strength of **No shadow**:
 clears faint dirt), `CONTRAST_BLACK_POINT` (how deep the ink goes), and
 `SATURATION_BOOST` (colour vividness). Lowering the white point cleans the page
 further at the cost of faint, pale strokes.
+
+### Placing a corner
+
+While a corner node moves, a square magnifier follows it with a crosshair in the
+middle. It is drawn from the full-resolution source, so the magnified detail goes
+beyond what the display canvas keeps, and it sits clear of the node so a finger
+does not cover the corner being placed. It is painted into the overlay canvas
+that a pointer move already repaints, so it adds no element and no extra pass.
+`LOUPE_SIZE`, `LOUPE_ZOOM`, and `LOUPE_GAP` in `src/components/CropEditor.tsx`
+set its size, its magnification, and its clearance from the node.
 
 ### Copy or save the preview
 

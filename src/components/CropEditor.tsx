@@ -25,6 +25,14 @@ const HANDLE_RADIUS = 9;
 const MIN_AREA_FRACTION = 0.015;
 const MAX_HEIGHT_RATIO = 0.7;
 const ACCENT = "#38bdf8";
+/** Side of the corner magnifier, in CSS pixels. */
+const LOUPE_SIZE = 128;
+/** How much the magnifier enlarges the photo, on top of the display scale. */
+const LOUPE_ZOOM = 2.5;
+/** Clearance between the node and the magnifier, in CSS pixels. */
+const LOUPE_GAP = 24;
+/** Inset of the magnifier from the edges of the photo, in CSS pixels. */
+const LOUPE_MARGIN = 6;
 
 export interface CropEditorProps {
 	image: HTMLCanvasElement;
@@ -33,6 +41,110 @@ export interface CropEditorProps {
 	onChange: (quad: Quad) => void;
 	/** Called when a corner drag starts and when it ends. */
 	onDragChange?: (dragging: boolean) => void;
+}
+
+/**
+ * Draw the magnifier that follows a dragged corner.
+ *
+ * The square is centred on the node but offset clear of it, so a finger does not
+ * cover what it is placing, and it is drawn from the full-resolution source, so
+ * it shows detail the scaled display canvas cannot. A crosshair marks the middle
+ * against the node underneath it.
+ *
+ * Everything here is in device pixels of the overlay canvas: the caller resets
+ * the transform first.
+ */
+function drawLoupe(
+	context: CanvasRenderingContext2D,
+	source: HTMLCanvasElement,
+	node: Point,
+	geometry: {
+		ratio: number;
+		scale: number;
+		canvasWidth: number;
+		canvasHeight: number;
+	},
+) {
+	const { ratio, scale, canvasWidth, canvasHeight } = geometry;
+	const size = LOUPE_SIZE * ratio;
+	/** Side of the region the square shows, in image pixels. */
+	const region = LOUPE_SIZE / LOUPE_ZOOM / scale;
+	const margin = LOUPE_MARGIN * ratio;
+
+	// Where the node sits in this canvas, and where the square goes.
+	const nodeX = node.x * scale * ratio;
+	const nodeY = node.y * scale * ratio;
+	let left = nodeX - size / 2;
+	let top = nodeY - size - LOUPE_GAP * ratio;
+	if (top < margin) top = nodeY + LOUPE_GAP * ratio;
+	left = Math.max(margin, Math.min(left, canvasWidth - size - margin));
+	top = Math.max(margin, Math.min(top, canvasHeight - size - margin));
+
+	context.setTransform(1, 0, 0, 1, 0, 0);
+	context.imageSmoothingEnabled = true;
+	context.imageSmoothingQuality = "high";
+
+	// Clip the source region to the photo, and shrink the drawn area to match,
+	// so the magnified page stays under the crosshair near an edge.
+	const sourceX = Math.max(0, node.x - region / 2);
+	const sourceY = Math.max(0, node.y - region / 2);
+	const sourceRight = Math.min(source.width, node.x + region / 2);
+	const sourceBottom = Math.min(source.height, node.y + region / 2);
+
+	context.fillStyle = "#020617";
+	context.fillRect(left, top, size, size);
+
+	if (sourceRight > sourceX && sourceBottom > sourceY) {
+		const drawnLeft =
+			left + ((sourceX - (node.x - region / 2)) / region) * size;
+		const drawnTop = top + ((sourceY - (node.y - region / 2)) / region) * size;
+		const drawnWidth = ((sourceRight - sourceX) / region) * size;
+		const drawnHeight = ((sourceBottom - sourceY) / region) * size;
+		context.drawImage(
+			source,
+			sourceX,
+			sourceY,
+			sourceRight - sourceX,
+			sourceBottom - sourceY,
+			drawnLeft,
+			drawnTop,
+			drawnWidth,
+			drawnHeight,
+		);
+	}
+
+	// Frame.
+	context.lineWidth = Math.max(1, ratio);
+	context.strokeStyle = ACCENT;
+	context.strokeRect(
+		left + context.lineWidth / 2,
+		top + context.lineWidth / 2,
+		size - context.lineWidth,
+		size - context.lineWidth,
+	);
+
+	// Crosshair: full-width arms with a gap at the middle, so the node underneath
+	// stays visible.
+	const centreX = left + size / 2;
+	const centreY = top + size / 2;
+	const gap = 7 * ratio;
+	const arm = size / 2;
+	context.strokeStyle = "rgba(226, 232, 240, 0.9)";
+	context.beginPath();
+	context.moveTo(centreX - arm, centreY);
+	context.lineTo(centreX - gap, centreY);
+	context.moveTo(centreX + gap, centreY);
+	context.lineTo(centreX + arm, centreY);
+	context.moveTo(centreX, centreY - arm);
+	context.lineTo(centreX, centreY - gap);
+	context.moveTo(centreX, centreY + gap);
+	context.lineTo(centreX, centreY + arm);
+	context.stroke();
+
+	context.beginPath();
+	context.arc(centreX, centreY, Math.max(1.5, 1.5 * ratio), 0, Math.PI * 2);
+	context.fillStyle = ACCENT;
+	context.fill();
 }
 
 /**
@@ -64,6 +176,8 @@ export function CropEditor({
 		{ kind: "corner"; index: number } | { kind: "move"; from: Point } | null
 	>(null);
 	const [display, setDisplay] = useState({ width: 0, height: 0 });
+	/** Corner under the finger, which the magnifier follows. */
+	const [activeCorner, setActiveCorner] = useState<number | null>(null);
 
 	useLayoutEffect(() => {
 		const node = containerRef.current;
@@ -169,7 +283,24 @@ export function CropEditor({
 			context.strokeStyle = "#0f172a";
 			context.stroke();
 		}
-	}, [display.width, image.width, image.height, quad, editable]);
+
+		if (activeCorner !== null) {
+			drawLoupe(context, image, points[activeCorner], {
+				ratio,
+				scale,
+				canvasWidth: overlay.width,
+				canvasHeight: overlay.height,
+			});
+		}
+	}, [
+		display.width,
+		image,
+		image.width,
+		image.height,
+		quad,
+		editable,
+		activeCorner,
+	]);
 
 	const toImagePoint = useCallback(
 		(clientX: number, clientY: number): Point => {
@@ -215,6 +346,7 @@ export function CropEditor({
 
 		if (index !== null) {
 			dragRef.current = { kind: "corner", index };
+			setActiveCorner(index);
 		} else if (quadContainsPoint(quad, point)) {
 			// Anywhere inside moves the whole crop, which is how a wrongly
 			// detected page is brought onto the page before the corners are
@@ -271,6 +403,7 @@ export function CropEditor({
 	const endDrag = (event: ReactPointerEvent<HTMLCanvasElement>) => {
 		if (dragRef.current === null) return;
 		dragRef.current = null;
+		setActiveCorner(null);
 		if (event.currentTarget.hasPointerCapture(event.pointerId)) {
 			event.currentTarget.releasePointerCapture(event.pointerId);
 		}
