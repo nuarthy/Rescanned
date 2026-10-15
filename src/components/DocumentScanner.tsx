@@ -456,7 +456,7 @@ function UploadZone({
 			}}
 			onDragLeave={() => onDragActiveChange(false)}
 			onDrop={onDrop}
-			className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-14 text-center transition ${
+			className={`flex w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-14 text-center transition ${
 				dragActive
 					? "border-sky-400 bg-sky-950/30"
 					: "border-slate-700 bg-slate-900/50 hover:border-slate-500"
@@ -471,7 +471,7 @@ function UploadZone({
 			<input
 				id="scanner-file"
 				type="file"
-				accept="image/*"
+				accept={IMAGE_ACCEPT}
 				className="sr-only"
 				disabled={busy}
 				onChange={onInputChange}
@@ -479,6 +479,19 @@ function UploadZone({
 		</label>
 	);
 }
+
+/**
+ * What the photo input asks the platform for.
+ *
+ * `image/*` alone is not enough on Android. From Android 13 the system photo
+ * picker took over this input, and that picker has no camera tile, so a phone
+ * that is not an iPhone can only reach the gallery. Chrome falls back to its
+ * older chooser, camera included, as soon as the filter names a type that is not
+ * an image; the entry here exists for that reason and matches no real file.
+ * `capture` is deliberately absent: it would send the input straight to the
+ * camera and take the gallery away.
+ */
+const IMAGE_ACCEPT = "image/*,application/x-rescanned-camera";
 
 const primaryButton =
 	"inline-flex items-center rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50";

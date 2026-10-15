@@ -24,8 +24,21 @@ export interface LoadedImage {
 export class ImageLoadError extends Error {}
 
 export function isSupportedImageFile(file: File): boolean {
-	return file.type.startsWith("image/");
+	if (file.type.startsWith("image/")) return true;
+
+	// A camera capture on Android can arrive with no MIME type at all, or as
+	// application/octet-stream, while still being a photo. The name is the only
+	// clue left, and the decode that follows rejects anything that is not an
+	// image, so this stays a cheap pre-check rather than a guarantee.
+	if (file.type === "" || file.type === "application/octet-stream") {
+		return IMAGE_NAME.test(file.name);
+	}
+
+	return false;
 }
+
+/** Extensions a phone, or a phone's camera, is likely to hand over. */
+const IMAGE_NAME = /\.(jpe?g|png|webp|heic|heif|avif|gif|bmp|tiff?)$/i;
 
 /**
  * Decode a file into a canvas, downscaling oversized photos.
