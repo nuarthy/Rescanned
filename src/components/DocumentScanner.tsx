@@ -1,4 +1,4 @@
-import { RotateCcw, RotateCw } from "lucide-react";
+import { Check, Copy, RotateCcw, RotateCw } from "lucide-react";
 import {
 	type ChangeEvent,
 	type DragEvent as ReactDragEvent,
@@ -61,6 +61,8 @@ export function DocumentScanner() {
 	/** Clockwise quarter turns applied to the corrected page. */
 	const [rotationTurns, setRotationTurns] = useState<QuarterTurns>(0);
 	const [filter, setFilter] = useState<DocumentFilter>("original");
+	/** Momentary tick on the copy button, so the click has a visible result. */
+	const [copied, setCopied] = useState(false);
 
 	/**
 	 * Renders the corrected page. Warping and filtering a megapixel image takes
@@ -227,6 +229,46 @@ export function DocumentScanner() {
 		}
 	};
 
+	const handleCopy = useCallback(async () => {
+		if (!preview) return;
+		if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
+			setError("This browser cannot copy an image. Use Download instead.");
+			return;
+		}
+
+		setError(null);
+
+		// Encode the pixels already on screen: no re-render and no worker round
+		// trip, so a copy costs one PNG encode of the preview.
+		const png = encodeCanvas(canvasFromPixels(preview), "image/png");
+
+		try {
+			try {
+				// WebKit rejects a clipboard write that begins after an await, so
+				// the promise goes straight into ClipboardItem and the write stays
+				// inside the click.
+				await navigator.clipboard.write([
+					new ClipboardItem({ "image/png": png }),
+				]);
+			} catch {
+				// Firefox takes a resolved Blob instead of a promise.
+				await navigator.clipboard.write([
+					new ClipboardItem({ "image/png": await png }),
+				]);
+			}
+			setCopied(true);
+		} catch {
+			setError("The image could not be copied. Use Download instead.");
+		}
+	}, [preview]);
+
+	// The tick is feedback only; it clears itself.
+	useEffect(() => {
+		if (!copied) return;
+		const timer = window.setTimeout(() => setCopied(false), 1500);
+		return () => window.clearTimeout(timer);
+	}, [copied]);
+
 	const changedFromDetection =
 		quad !== null &&
 		detectedQuad !== null &&
@@ -249,7 +291,7 @@ export function DocumentScanner() {
 				</div>
 				<p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-base">
 					Upload a photo of a document. The page corners are found for you; if
-					they are off, open the editor and drag them. Then download the
+					they are off, open the editor and drag them. Then copy or download the
 					straightened scan.
 				</p>
 			</header>
@@ -369,6 +411,11 @@ export function DocumentScanner() {
 							>
 								<RotateCw className="h-5 w-5" aria-hidden="true" />
 							</button>
+							<CopyButton
+								copied={copied}
+								disabled={!preview}
+								onCopy={handleCopy}
+							/>
 							<button
 								type="button"
 								className={`${primaryButton} flex-1 justify-center sm:flex-none`}
@@ -393,6 +440,33 @@ export function DocumentScanner() {
 				</div>
 			)}
 		</div>
+	);
+}
+
+function CopyButton({
+	copied,
+	disabled,
+	onCopy,
+}: {
+	copied: boolean;
+	disabled: boolean;
+	onCopy: () => Promise<void>;
+}) {
+	return (
+		<button
+			type="button"
+			aria-label={copied ? "Image copied" : "Copy image"}
+			title={copied ? "Copied" : "Copy image"}
+			className={iconButton}
+			disabled={disabled}
+			onClick={() => void onCopy()}
+		>
+			{copied ? (
+				<Check className="h-5 w-5 text-emerald-300" aria-hidden="true" />
+			) : (
+				<Copy className="h-5 w-5" aria-hidden="true" />
+			)}
+		</button>
 	);
 }
 
@@ -470,6 +544,6 @@ const activeChip =
 const inactiveChip =
 	"rounded-full border border-slate-700 px-3 py-1 text-xs font-medium text-slate-300 transition hover:border-slate-500 hover:bg-slate-800/60";
 const iconButton =
-	"inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-700 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/60";
+	"inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-700 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-700 disabled:hover:bg-transparent";
 const secondaryButton =
 	"inline-flex items-center rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-40";

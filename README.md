@@ -1,8 +1,9 @@
 # Rescanned
 
 A browser-based document scanner. Upload a photo of a document. The app finds
-the page corners, corrects the perspective, and downloads a flat scan. You can
-move the corners by hand when the automatic detection is not exact.
+the page corners, corrects the perspective, and then copies or downloads a flat
+scan. You can move the corners by hand when the automatic detection is not
+exact.
 
 The app runs entirely in the browser. No image leaves the device.
 
@@ -51,7 +52,7 @@ bun --bun run deploy
 ## How it works
 
 ```
-upload ──► decode to canvas ──► detect page quad ──► review ──► warp ──► download
+upload ──► decode to canvas ──► detect page quad ──► review ──► warp ──► copy / download
                                       │                  │
                                       │                  └── Edit corners: drag the nodes
                                       └── full-frame inset when detection is unsure
@@ -119,6 +120,16 @@ Three constants in `src/lib/filters.ts` set the strength of **No shadow**:
 clears faint dirt), `CONTRAST_BLACK_POINT` (how deep the ink goes), and
 `SATURATION_BOOST` (colour vividness). Lowering the white point cleans the page
 further at the cost of faint, pale strokes.
+
+### Copy and download
+
+**Copy** puts the pixels already on screen on the clipboard as a PNG, so it costs
+one encode of the preview and nothing else: no re-render and no worker round
+trip. The clipboard call is made inside the click, which WebKit requires, and a
+browser that cannot write images gets a message pointing at Download instead.
+
+**Download** renders the page again at full source resolution in the worker and
+encodes a JPEG at quality 0.92, which takes longer and gives a bigger file.
 
 ## Limits and known gaps
 

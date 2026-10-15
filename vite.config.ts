@@ -1,6 +1,6 @@
+import { cloudflare } from "@cloudflare/vite-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import { devtools } from "@tanstack/devtools-vite";
-import { cloudflare } from "@cloudflare/vite-plugin";
 
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 
