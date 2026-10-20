@@ -1,6 +1,7 @@
 import {
 	type PointerEvent as ReactPointerEvent,
 	useCallback,
+	useEffect,
 	useLayoutEffect,
 	useRef,
 	useState,
@@ -12,202 +13,258 @@ import {
 	type Point,
 	type Quad,
 	quadArea,
-	quadContainsPoint,
 	quadPoints,
-	translateQuad,
 	withQuadCorner,
 } from "#/lib/geometry";
+import {
+	normalizeTurns,
+	type Orientation,
+	orientedSize,
+	toDisplayPoint,
+	toPhotoPoint,
+} from "#/lib/orientation";
 
 /** Touch-friendly grab radius, in CSS pixels. */
 const HANDLE_HIT_RADIUS = 26;
-const HANDLE_RADIUS = 9;
+/** Side of the drawn handle, in CSS pixels. */
+const HANDLE_SIZE = 14;
 /** A quad smaller than this share of the image is rejected while dragging. */
 const MIN_AREA_FRACTION = 0.015;
-const MAX_HEIGHT_RATIO = 0.7;
-const ACCENT = "#38bdf8";
+const ACCENT = "#1c1c1e";
+const HANDLE_FILL = "#ffffff";
 /** Side of the corner magnifier, in CSS pixels. */
-const LOUPE_SIZE = 128;
+const LOUPE_SIZE = 148;
 /** How much the magnifier enlarges the photo, on top of the display scale. */
-const LOUPE_ZOOM = 2.5;
+const LOUPE_ZOOM = 3;
 /** Clearance between the node and the magnifier, in CSS pixels. */
-const LOUPE_GAP = 24;
+const LOUPE_GAP = 16;
 /** Inset of the magnifier from the edges of the photo, in CSS pixels. */
 const LOUPE_MARGIN = 6;
+/** How far inside its square the crosshair is kept, in CSS pixels. */
+const LOUPE_CROSS_INSET = 12;
 
 export interface CropEditorProps {
 	image: HTMLCanvasElement;
+	/** Corners in the photo's own coordinates, whatever the turn. */
 	quad: Quad;
-	editable: boolean;
+	/** The turn and mirror the photo is shown with. */
+	orientation: Orientation;
+	/** Magnification applied by the zoom row. */
+	zoom: number;
 	onChange: (quad: Quad) => void;
 	/** Called when a corner drag starts and when it ends. */
 	onDragChange?: (dragging: boolean) => void;
+}
+
+/** Compose two 2D matrices: the result applies `b`, then `a`. */
+function multiply(
+	a: [number, number, number, number, number, number],
+	b: [number, number, number, number, number, number],
+): [number, number, number, number, number, number] {
+	return [
+		a[0] * b[0] + a[2] * b[1],
+		a[1] * b[0] + a[3] * b[1],
+		a[0] * b[2] + a[2] * b[3],
+		a[1] * b[2] + a[3] * b[3],
+		a[0] * b[4] + a[2] * b[5] + a[4],
+		a[1] * b[4] + a[3] * b[5] + a[5],
+	];
+}
+
+/** Photo coordinates to displayed coordinates, as a canvas matrix. */
+function displayMatrix(
+	image: { width: number; height: number },
+	orientation: Orientation,
+): {
+	matrix: [number, number, number, number, number, number];
+	size: { width: number; height: number };
+} {
+	const size = orientedSize(image, orientation);
+	const turns = normalizeTurns(orientation.turns);
+
+	let matrix: [number, number, number, number, number, number] = [
+		1, 0, 0, 1, 0, 0,
+	];
+	if (turns === 1) matrix = [0, 1, -1, 0, image.height, 0];
+	if (turns === 2) matrix = [-1, 0, 0, -1, image.width, image.height];
+	if (turns === 3) matrix = [0, -1, 1, 0, 0, image.width];
+	if (orientation.flipHorizontal) {
+		matrix = multiply([-1, 0, 0, 1, size.width, 0], matrix);
+	}
+	if (orientation.flipVertical) {
+		matrix = multiply([1, 0, 0, -1, 0, size.height], matrix);
+	}
+	return { matrix, size };
 }
 
 /**
  * Draw the magnifier that follows a dragged corner.
  *
  * The square is centred on the node but offset clear of it, so a finger does not
- * cover what it is placing, and it is drawn from the full-resolution source, so
- * it shows detail the scaled display canvas cannot. A crosshair marks the middle
- * against the node underneath it.
+ * cover what it is placing. It is cut from the photo layer, which already has
+ * the turn and the zoom applied, so it shows what the screen shows.
  *
- * Everything here is in device pixels of the overlay canvas: the caller resets
- * the transform first.
+ * Everything here is in device pixels of the loupe canvas.
  */
 function drawLoupe(
 	context: CanvasRenderingContext2D,
-	source: HTMLCanvasElement,
-	node: Point,
-	geometry: {
-		ratio: number;
-		scale: number;
-		canvasWidth: number;
-		canvasHeight: number;
-	},
+	photo: HTMLCanvasElement,
+	displayPoint: Point,
+	displayWidth: number,
+	displayHeight: number,
+	displayScale: number,
 ) {
-	const { ratio, scale, canvasWidth, canvasHeight } = geometry;
-	const size = LOUPE_SIZE * ratio;
-	/** Side of the region the square shows, in image pixels. */
-	const region = LOUPE_SIZE / LOUPE_ZOOM / scale;
-	const margin = LOUPE_MARGIN * ratio;
-
-	// Where the node sits in this canvas, and where the square goes.
-	const nodeX = node.x * scale * ratio;
-	const nodeY = node.y * scale * ratio;
-	let left = nodeX - size / 2;
-	let top = nodeY - size - LOUPE_GAP * ratio;
-	if (top < margin) top = nodeY + LOUPE_GAP * ratio;
-	left = Math.max(margin, Math.min(left, canvasWidth - size - margin));
-	top = Math.max(margin, Math.min(top, canvasHeight - size - margin));
-
-	context.setTransform(1, 0, 0, 1, 0, 0);
-	context.imageSmoothingEnabled = true;
-	context.imageSmoothingQuality = "high";
-
-	// Clip the source region to the photo, and shrink the drawn area to match,
-	// so the magnified page stays under the crosshair near an edge.
-	const sourceX = Math.max(0, node.x - region / 2);
-	const sourceY = Math.max(0, node.y - region / 2);
-	const sourceRight = Math.min(source.width, node.x + region / 2);
-	const sourceBottom = Math.min(source.height, node.y + region / 2);
-
-	context.fillStyle = "#020617";
-	context.fillRect(left, top, size, size);
-
-	if (sourceRight > sourceX && sourceBottom > sourceY) {
-		const drawnLeft =
-			left + ((sourceX - (node.x - region / 2)) / region) * size;
-		const drawnTop = top + ((sourceY - (node.y - region / 2)) / region) * size;
-		const drawnWidth = ((sourceRight - sourceX) / region) * size;
-		const drawnHeight = ((sourceBottom - sourceY) / region) * size;
-		context.drawImage(
-			source,
-			sourceX,
-			sourceY,
-			sourceRight - sourceX,
-			sourceBottom - sourceY,
-			drawnLeft,
-			drawnTop,
-			drawnWidth,
-			drawnHeight,
-		);
-	}
-
-	// Frame: thick enough to read against white paper and against a dark photo.
-	const frameWidth = Math.max(2, 1.5 * ratio);
-	context.lineWidth = frameWidth;
-	context.strokeStyle = ACCENT;
-	context.strokeRect(
-		left + frameWidth / 2,
-		top + frameWidth / 2,
-		size - frameWidth,
-		size - frameWidth,
+	// Place the square beside the node, clear of the finger, inside the photo.
+	const left = Math.min(
+		displayWidth - LOUPE_SIZE - LOUPE_MARGIN,
+		Math.max(
+			LOUPE_MARGIN,
+			displayPoint.x > displayWidth / 2
+				? displayPoint.x - LOUPE_SIZE - LOUPE_GAP
+				: displayPoint.x + LOUPE_GAP,
+		),
+	);
+	const top = Math.min(
+		displayHeight - LOUPE_SIZE - LOUPE_MARGIN,
+		Math.max(
+			LOUPE_MARGIN,
+			displayPoint.y > displayHeight / 2
+				? displayPoint.y - LOUPE_SIZE - LOUPE_GAP
+				: displayPoint.y + LOUPE_GAP,
+		),
 	);
 
-	// Crosshair: full-width arms with a gap at the middle, so the node underneath
-	// stays visible. Each pass draws a dark arm under a light one, because a
-	// light line alone vanishes over a dark line of text and a dark line alone
-	// vanishes over the paper.
-	const centreX = left + size / 2;
-	const centreY = top + size / 2;
-	const gap = 7 * ratio;
-	const arm = size / 2 - 8 * ratio;
-	const arms = () => {
+	const size = LOUPE_SIZE * displayScale;
+	const x = left * displayScale;
+	const y = top * displayScale;
+	const span = (LOUPE_SIZE / LOUPE_ZOOM) * displayScale;
+
+	// The node in the photo layer's pixels.
+	const nodeX = displayPoint.x * displayScale;
+	const nodeY = displayPoint.y * displayScale;
+
+	// Near an edge the square that would be centred on the node reaches past
+	// the photo, and drawing past it stretches the border pixels into a smear.
+	// The window slides inward instead, which keeps the square full of real
+	// pixels, and the crosshair moves to wherever the node now sits.
+	const half = span / 2;
+	const windowX =
+		photo.width <= span
+			? (photo.width - span) / 2
+			: clamp(nodeX - half, 0, photo.width - span);
+	const windowY =
+		photo.height <= span
+			? (photo.height - span) / 2
+			: clamp(nodeY - half, 0, photo.height - span);
+
+	context.setTransform(1, 0, 0, 1, 0, 0);
+	context.save();
+	// One clip for the picture and the crosshair: the square is the frame, so
+	// neither can spill outside it.
+	context.beginPath();
+	context.roundRect(x, y, size, size, 8 * displayScale);
+	context.clip();
+	context.imageSmoothingEnabled = true;
+	context.drawImage(photo, windowX, windowY, span, span, x, y, size, size);
+
+	// Arms run the full width and height of the square, so they read as a
+	// crosshair rather than as marks that stop short of the edge.
+	// The node's place inside the square, held a little way in from the border.
+	// A crosshair drawn exactly on the frame would be swallowed by it, so the
+	// last few pixels of travel are given up to keep it visible.
+	const scale = size / span;
+	const inset = LOUPE_CROSS_INSET * displayScale;
+	const centreX = clamp(
+		x + (nodeX - windowX) * scale,
+		x + inset,
+		x + size - inset,
+	);
+	const centreY = clamp(
+		y + (nodeY - windowY) * scale,
+		y + inset,
+		y + size - inset,
+	);
+	const lineWidth = Math.max(1, displayScale);
+
+	for (const [colour, width] of [
+		["rgba(2, 6, 23, 0.75)", lineWidth * 3],
+		["rgba(255, 255, 255, 0.98)", lineWidth],
+	] as const) {
+		context.strokeStyle = colour;
+		context.lineWidth = width;
 		context.beginPath();
-		context.moveTo(centreX - arm, centreY);
-		context.lineTo(centreX - gap, centreY);
-		context.moveTo(centreX + gap, centreY);
-		context.lineTo(centreX + arm, centreY);
-		context.moveTo(centreX, centreY - arm);
-		context.lineTo(centreX, centreY - gap);
-		context.moveTo(centreX, centreY + gap);
-		context.lineTo(centreX, centreY + arm);
+		context.moveTo(x, centreY);
+		context.lineTo(x + size, centreY);
+		context.moveTo(centreX, y);
+		context.lineTo(centreX, y + size);
 		context.stroke();
-	};
-
-	context.lineWidth = Math.max(3.5, 3.5 * ratio);
-	context.strokeStyle = "rgba(2, 6, 23, 0.75)";
-	arms();
-	context.lineWidth = Math.max(1.5, 1.5 * ratio);
-	context.strokeStyle = "rgba(248, 250, 252, 0.98)";
-	arms();
+	}
+	context.restore();
 
 	context.beginPath();
-	context.arc(centreX, centreY, Math.max(2.5, 2.5 * ratio), 0, Math.PI * 2);
-	context.fillStyle = "rgba(2, 6, 23, 0.75)";
-	context.fill();
-	context.beginPath();
-	context.arc(centreX, centreY, Math.max(1.5, 1.5 * ratio), 0, Math.PI * 2);
-	context.fillStyle = ACCENT;
-	context.fill();
+	context.roundRect(x, y, size, size, 8 * displayScale);
+	context.lineWidth = 2 * displayScale;
+	context.strokeStyle = "rgba(255,255,255,0.95)";
+	context.stroke();
 }
 
 /**
  * Shows the photo with the crop quad on top and lets the user drag the four
  * corners.
  *
- * Two stacked canvases keep a drag cheap. The photo is scaled into its own
- * canvas once per size, so a pointer move repaints only the overlay: the dim
- * mask, the outline and the handles. Redrawing the photo every frame means
- * resampling a multi-megapixel image sixty times a second, which a phone
- * cannot keep up with.
+ * Two stacked canvases keep a drag cheap. The photo is scaled, turned and
+ * mirrored into its own canvas once per size, so a pointer move repaints only
+ * the overlay: the dim mask, the outline and the handles. Redrawing the photo
+ * every frame means resampling a multi-megapixel image sixty times a second,
+ * which a phone cannot keep up with.
  *
- * Both canvases are drawn in image pixel coordinates, so the geometry matches
- * the values that feed the perspective transform and the handle size only has
- * to be divided by the display scale.
+ * The corners are stored in the photo's coordinates and converted for display,
+ * so a turn never rewrites the crop, only the way it is drawn.
  */
 export function CropEditor({
 	image,
 	quad,
-	editable,
+	orientation,
+	zoom,
 	onChange,
 	onDragChange,
 }: CropEditorProps) {
 	const containerRef = useRef<HTMLDivElement>(null);
 	const photoRef = useRef<HTMLCanvasElement>(null);
 	const overlayRef = useRef<HTMLCanvasElement>(null);
-	/** Either a single corner being dragged, or the whole quad moving. */
+	/** A corner being dragged, or the zoomed photo being panned. */
 	const dragRef = useRef<
-		{ kind: "corner"; index: number } | { kind: "move"; from: Point } | null
+		| { kind: "corner"; index: number }
+		| { kind: "pan"; pointer: Point; pan: Point }
+		| null
 	>(null);
 	const [display, setDisplay] = useState({ width: 0, height: 0 });
+	/** Offset of the zoomed photo inside its box, in CSS pixels. */
+	const [pan, setPan] = useState({ x: 0, y: 0 });
 	/** Corner under the finger, which the magnifier follows. */
 	const [activeCorner, setActiveCorner] = useState<number | null>(null);
 
+	const displaySize = orientedSize(
+		{ width: image.width, height: image.height },
+		orientation,
+	);
+
+	// The photo fills whatever the layout gives it: both sides are measured, so
+	// a tall photo is limited by height instead of stretching to the full width.
 	useLayoutEffect(() => {
 		const node = containerRef.current;
 		if (!node) return;
 
 		const update = () => {
 			const availableWidth = node.clientWidth;
-			if (availableWidth === 0) return;
-			const maxHeight = Math.max(240, window.innerHeight * MAX_HEIGHT_RATIO);
+			const availableHeight = node.clientHeight;
+			if (availableWidth === 0 || availableHeight === 0) return;
 			const scale = Math.min(
-				availableWidth / image.width,
-				maxHeight / image.height,
+				availableWidth / displaySize.width,
+				availableHeight / displaySize.height,
 			);
-			const width = Math.round(image.width * scale);
-			const height = Math.round(image.height * scale);
+			const width = Math.round(displaySize.width * scale);
+			const height = Math.round(displaySize.height * scale);
 			setDisplay((previous) =>
 				previous.width === width && previous.height === height
 					? previous
@@ -223,7 +280,7 @@ export function CropEditor({
 			observer.disconnect();
 			window.removeEventListener("resize", update);
 		};
-	}, [image]);
+	}, [displaySize.width, displaySize.height]);
 
 	// Photo layer: sized and drawn once per display size. This is the only place
 	// the full-resolution photo is resampled.
@@ -242,12 +299,23 @@ export function CropEditor({
 
 		const context = photo.getContext("2d");
 		if (!context) return;
-		const scale = display.width / image.width;
-		context.setTransform(ratio * scale, 0, 0, ratio * scale, 0, 0);
+		context.setTransform(1, 0, 0, 1, 0, 0);
+		context.clearRect(0, 0, pixelWidth, pixelHeight);
+
+		const scale = display.width / displaySize.width;
+		const { matrix } = displayMatrix(image, orientation);
+		const k = ratio * scale;
+		context.setTransform(
+			matrix[0] * k,
+			matrix[1] * k,
+			matrix[2] * k,
+			matrix[3] * k,
+			matrix[4] * k,
+			matrix[5] * k,
+		);
 		context.imageSmoothingQuality = "high";
-		context.clearRect(0, 0, image.width, image.height);
-		context.drawImage(image, 0, 0, image.width, image.height);
-	}, [image, display.width, display.height]);
+		context.drawImage(image, 0, 0);
+	}, [image, orientation, display.width, display.height, displaySize.width]);
 
 	// Overlay layer: the only thing a pointer move repaints.
 	useLayoutEffect(() => {
@@ -255,7 +323,7 @@ export function CropEditor({
 		if (!overlay || display.width === 0) return;
 
 		const ratio = Math.min(window.devicePixelRatio || 1, 2.5);
-		const scale = display.width / image.width;
+		const scale = display.width / displaySize.width;
 		const context = overlay.getContext("2d");
 		if (!context) return;
 
@@ -263,18 +331,19 @@ export function CropEditor({
 		context.clearRect(0, 0, overlay.width, overlay.height);
 		context.setTransform(ratio * scale, 0, 0, ratio * scale, 0, 0);
 
-		const points = quadPoints(quad);
+		const points = quadPoints(quad).map((point) =>
+			toDisplayPoint(point, image, orientation),
+		);
 
-		// Dim everything outside the quad. One path with two subpaths plus the
-		// even-odd rule fills the frame minus the quad.
+		// Lift the photo around the crop so the page reads as the subject.
 		context.beginPath();
-		context.rect(0, 0, image.width, image.height);
+		context.rect(0, 0, displaySize.width, displaySize.height);
 		context.moveTo(points[0].x, points[0].y);
 		for (let i = 1; i < points.length; i += 1) {
 			context.lineTo(points[i].x, points[i].y);
 		}
 		context.closePath();
-		context.fillStyle = "rgba(2, 6, 23, 0.55)";
+		context.fillStyle = "rgba(255, 255, 255, 0.32)";
 		context.fill("evenodd");
 
 		context.beginPath();
@@ -284,58 +353,93 @@ export function CropEditor({
 		}
 		context.closePath();
 		context.lineJoin = "round";
-		context.lineWidth = 2 / scale;
-		context.strokeStyle = editable ? ACCENT : "rgba(226, 232, 240, 0.95)";
+		context.lineWidth = 1.5 / scale;
+		context.strokeStyle = ACCENT;
 		context.stroke();
 
-		const handleRadius = HANDLE_RADIUS / scale;
+		const half = HANDLE_SIZE / 2 / scale;
 		for (const point of points) {
 			context.beginPath();
-			context.arc(point.x, point.y, handleRadius, 0, Math.PI * 2);
-			context.fillStyle = editable ? ACCENT : "rgba(226, 232, 240, 0.95)";
+			context.roundRect(
+				point.x - half,
+				point.y - half,
+				half * 2,
+				half * 2,
+				2 / scale,
+			);
+			context.fillStyle = HANDLE_FILL;
 			context.fill();
-			context.lineWidth = 2 / scale;
-			context.strokeStyle = "#0f172a";
+			context.lineWidth = 1.5 / scale;
+			context.strokeStyle = ACCENT;
 			context.stroke();
 		}
 
 		if (activeCorner !== null) {
-			drawLoupe(context, image, points[activeCorner], {
-				ratio,
-				scale,
-				canvasWidth: overlay.width,
-				canvasHeight: overlay.height,
-			});
+			const photo = photoRef.current;
+			if (photo) {
+				// The corner is in photo pixels; the magnifier works in the CSS
+				// box and cuts from the photo layer in device pixels.
+				const scaleX = display.width / displaySize.width;
+				const scaleY = display.height / displaySize.height;
+				drawLoupe(
+					context,
+					photo,
+					{
+						x: points[activeCorner].x * scaleX,
+						y: points[activeCorner].y * scaleY,
+					},
+					display.width,
+					display.height,
+					Math.min(window.devicePixelRatio || 1, 2.5),
+				);
+			}
 		}
 	}, [
 		display.width,
+		displaySize.width,
+		displaySize.height,
 		image,
-		image.width,
-		image.height,
+		orientation,
 		quad,
-		editable,
 		activeCorner,
 	]);
 
-	const toImagePoint = useCallback(
+	/** Half of the overflow at this zoom: the furthest the photo may travel. */
+	const panLimit = {
+		x: Math.max(0, (display.width * (zoom - 1)) / 2),
+		y: Math.max(0, (display.height * (zoom - 1)) / 2),
+	};
+
+	// Zooming out must not leave the photo parked outside its box.
+	useEffect(() => {
+		setPan((current) => ({
+			x: clamp(current.x, -panLimit.x, panLimit.x),
+			y: clamp(current.y, -panLimit.y, panLimit.y),
+		}));
+	}, [panLimit.x, panLimit.y]);
+
+	/** The finger's position, in displayed coordinates. */
+	const toDisplaySpace = useCallback(
 		(clientX: number, clientY: number): Point => {
 			const canvas = overlayRef.current;
 			if (!canvas) return { x: 0, y: 0 };
 			const rect = canvas.getBoundingClientRect();
 			if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0 };
 			return {
-				x: ((clientX - rect.left) / rect.width) * image.width,
-				y: ((clientY - rect.top) / rect.height) * image.height,
+				x: ((clientX - rect.left) / rect.width) * displaySize.width,
+				y: ((clientY - rect.top) / rect.height) * displaySize.height,
 			};
 		},
-		[image],
+		[displaySize.width, displaySize.height],
 	);
 
 	const findHandle = useCallback(
 		(point: Point): number | null => {
-			const scale = display.width === 0 ? 1 : image.width / display.width;
+			const scale = display.width === 0 ? 1 : displaySize.width / display.width;
 			const grabRadius = HANDLE_HIT_RADIUS * scale;
-			const points = quadPoints(quad);
+			const points = quadPoints(quad).map((corner) =>
+				toDisplayPoint(corner, image, orientation),
+			);
 
 			let nearest: number | null = null;
 			let nearestDistance = Number.POSITIVE_INFINITY;
@@ -351,27 +455,30 @@ export function CropEditor({
 			}
 			return nearest;
 		},
-		[display.width, image.width, quad],
+		[display.width, displaySize.width, image, orientation, quad],
 	);
 
 	const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-		if (!editable) return;
-		const point = toImagePoint(event.clientX, event.clientY);
+		const point = toDisplaySpace(event.clientX, event.clientY);
 		const index = findHandle(point);
 
 		if (index !== null) {
 			dragRef.current = { kind: "corner", index };
 			setActiveCorner(index);
-		} else if (quadContainsPoint(quad, point)) {
-			// Anywhere inside moves the whole crop, which is how a wrongly
-			// detected page is brought onto the page before the corners are
-			// fine-tuned.
-			dragRef.current = { kind: "move", from: point };
+			onDragChange?.(true);
+		} else if (panLimit.x > 0 || panLimit.y > 0) {
+			// A drag on the photo moves the view, not the crop: at a zoom above
+			// 100% the page is larger than the box, and looking around is what a
+			// finger on the picture is expected to do.
+			dragRef.current = {
+				kind: "pan",
+				pointer: { x: event.clientX, y: event.clientY },
+				pan,
+			};
 		} else {
 			return;
 		}
 
-		onDragChange?.(true);
 		event.preventDefault();
 
 		// Capture keeps the drag alive when the pointer leaves the canvas, but
@@ -388,22 +495,26 @@ export function CropEditor({
 		const drag = dragRef.current;
 		if (!drag) return;
 
-		const point = toImagePoint(event.clientX, event.clientY);
+		const point = toDisplaySpace(event.clientX, event.clientY);
 
-		if (drag.kind === "move") {
-			onChange(
-				translateQuad(
-					quad,
-					point.x - drag.from.x,
-					point.y - drag.from.y,
-					image.width,
-					image.height,
+		if (drag.kind === "pan") {
+			setPan({
+				x: clamp(
+					drag.pan.x + (event.clientX - drag.pointer.x),
+					-panLimit.x,
+					panLimit.x,
 				),
-			);
+				y: clamp(
+					drag.pan.y + (event.clientY - drag.pointer.y),
+					-panLimit.y,
+					panLimit.y,
+				),
+			});
 			return;
 		}
 
-		const clamped = clampPointToBounds(point, image.width, image.height);
+		const photoPoint = toPhotoPoint(point, image, orientation);
+		const clamped = clampPointToBounds(photoPoint, image.width, image.height);
 		const candidate = withQuadCorner(quad, drag.index, clamped);
 		const points = quadPoints(candidate);
 
@@ -425,34 +536,63 @@ export function CropEditor({
 		onDragChange?.(false);
 	};
 
-	const canvasStyle = {
-		inset: 0,
-		margin: "auto",
+	// A pointer that lifts outside the canvas, or a gesture the browser takes
+	// over, would otherwise leave the drag open and freeze the result.
+	useEffect(() => {
+		const stop = () => {
+			if (dragRef.current === null) return;
+			dragRef.current = null;
+			setActiveCorner(null);
+			onDragChange?.(false);
+		};
+		window.addEventListener("pointerup", stop);
+		window.addEventListener("pointercancel", stop);
+		return () => {
+			window.removeEventListener("pointerup", stop);
+			window.removeEventListener("pointercancel", stop);
+		};
+	}, [onDragChange]);
+
+	const card = {
 		width: display.width || undefined,
 		height: display.height || undefined,
+		transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
 	};
 
 	return (
 		<div
 			ref={containerRef}
-			className="relative w-full overflow-hidden rounded-lg shadow-lg shadow-slate-950/40"
-			style={{ height: display.height || undefined }}
+			className="flex h-full w-full items-center justify-center overflow-hidden"
 		>
-			<canvas ref={photoRef} className="absolute" style={canvasStyle} />
-			<canvas
-				ref={overlayRef}
-				aria-label="Photo with the crop corners"
-				className="absolute block"
-				style={{
-					...canvasStyle,
-					touchAction: "none",
-					cursor: editable ? "grab" : "default",
-				}}
-				onPointerDown={handlePointerDown}
-				onPointerMove={handlePointerMove}
-				onPointerUp={endDrag}
-				onPointerCancel={endDrag}
-			/>
+			<div
+				className="relative overflow-hidden rounded-[10px] bg-white shadow-[0_2px_10px_rgba(0,0,0,0.12)]"
+				style={card}
+			>
+				<canvas
+					ref={photoRef}
+					className="absolute inset-0 h-full w-full"
+					style={{ width: display.width, height: display.height }}
+				/>
+				<canvas
+					ref={overlayRef}
+					aria-label="Photo with the crop corners"
+					className="absolute inset-0 block h-full w-full"
+					style={{
+						width: display.width,
+						height: display.height,
+						touchAction: "none",
+						cursor: "grab",
+					}}
+					onPointerDown={handlePointerDown}
+					onPointerMove={handlePointerMove}
+					onPointerUp={endDrag}
+					onPointerCancel={endDrag}
+				/>
+			</div>
 		</div>
 	);
+}
+
+function clamp(value: number, low: number, high: number): number {
+	return value < low ? low : value > high ? high : value;
 }

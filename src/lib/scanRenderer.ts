@@ -5,9 +5,12 @@
  * on-main-thread fallback.
  */
 
+import { applyAdjustments } from "./adjustments";
 import { type DetectionResult, detectDocumentQuadOrFallback } from "./detect";
 import { applyFilter } from "./filters";
 import { canvasFromPixels, encodeCanvas } from "./imageFile";
+import { orientRgba } from "./orientation";
+import { applyShape } from "./paper";
 import { warpQuadToRgba } from "./perspective";
 import type { RgbaImage } from "./pixels";
 import type {
@@ -40,9 +43,19 @@ function renderOnMainThread(
 	source: RgbaImage,
 	request: RenderRequest,
 ): RgbaImage {
-	return applyFilter(
-		warpQuadToRgba(source, request.quad, request.maxDimension),
-		request.filter,
+	return applyShape(
+		orientRgba(
+			applyAdjustments(
+				applyFilter(
+					warpQuadToRgba(source, request.quad, request.maxDimension),
+					request.filter,
+				),
+				request.adjustments,
+			),
+			request.orientation,
+		),
+		request.shape,
+		request.maxDimension,
 	);
 }
 

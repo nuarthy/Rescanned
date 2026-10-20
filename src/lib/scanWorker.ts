@@ -8,9 +8,12 @@
  * The source pixels are sent once and kept; each request is then a few numbers.
  */
 
+import { type Adjustments, applyAdjustments } from "./adjustments";
 import { type DetectionResult, detectDocumentQuadOrFallback } from "./detect";
 import { applyFilter, type DocumentFilter } from "./filters";
 import type { Quad } from "./geometry";
+import { type Orientation, orientRgba } from "./orientation";
+import { applyShape, type OutputShape } from "./paper";
 import { warpQuadToRgba } from "./perspective";
 import type { RgbaImage } from "./pixels";
 
@@ -19,6 +22,12 @@ export interface RenderRequest {
 	quad: Quad;
 	maxDimension: number;
 	filter: DocumentFilter;
+	/** The sheet or ratio the page is stretched to, or the crop's shape. */
+	shape: OutputShape;
+	/** Slider values applied after the filter, before the shape. */
+	adjustments: Adjustments;
+	/** The turn and mirror the crop screen shows. */
+	orientation: Orientation;
 }
 
 /** A render that also encodes the page, for a preview that only has to show it. */
@@ -103,7 +112,17 @@ scope.addEventListener("message", async (event) => {
 
 	if (message.type === "renderImage") {
 		const warped = warpQuadToRgba(source, message.quad, message.maxDimension);
-		const image = applyFilter(warped, message.filter);
+		const image = applyShape(
+			orientRgba(
+				applyAdjustments(
+					applyFilter(warped, message.filter),
+					message.adjustments,
+				),
+				message.orientation,
+			),
+			message.shape,
+			message.maxDimension,
+		);
 		const encoded = await encodeOffscreen(
 			image,
 			message.encodeType,
@@ -145,7 +164,17 @@ scope.addEventListener("message", async (event) => {
 	}
 
 	const warped = warpQuadToRgba(source, message.quad, message.maxDimension);
-	const image = applyFilter(warped, message.filter);
+	const image = applyShape(
+		orientRgba(
+			applyAdjustments(
+				applyFilter(warped, message.filter),
+				message.adjustments,
+			),
+			message.orientation,
+		),
+		message.shape,
+		message.maxDimension,
+	);
 
 	// Hand the pixels over instead of copying them: a full-resolution page is
 	// tens of megabytes.

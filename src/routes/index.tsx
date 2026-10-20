@@ -6,7 +6,7 @@ export const Route = createFileRoute("/")({ component: Home });
 
 function Home() {
 	return (
-		<main className="min-h-dvh bg-slate-950 text-slate-100">
+		<main className="min-h-dvh bg-[#dcdcda] text-[#1c1c1e]">
 			<ClientOnly fallback={<ScannerPlaceholder />}>
 				<DocumentScanner />
 			</ClientOnly>
@@ -20,9 +20,9 @@ function Home() {
  */
 function ScannerPlaceholder() {
 	return (
-		<div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6">
-			<div className="h-8 w-64 rounded bg-slate-800/70" />
-			<div className="mt-8 h-56 rounded-xl border-2 border-dashed border-slate-800 bg-slate-900/40" />
+		<div className="mx-auto w-full max-w-[460px] px-3 py-4">
+			<div className="h-7 w-40 rounded bg-[#cfcfca]" />
+			<div className="mt-6 h-56 rounded-xl border border-dashed border-[#c5c5c0] bg-white/60" />
 		</div>
 	);
 }
