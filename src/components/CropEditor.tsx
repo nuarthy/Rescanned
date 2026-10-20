@@ -396,6 +396,7 @@ export function CropEditor({
 		}
 	}, [
 		display.width,
+		display.height,
 		displaySize.width,
 		displaySize.height,
 		image,
